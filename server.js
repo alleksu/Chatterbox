@@ -9,12 +9,18 @@ const HOST = '0.0.0.0';
 const MAX_HISTORY = 200;
 const MAX_TEXT = 2000;
 const MAX_NAME = 24;
+const MAX_GROUP_NAME = 40;
+const MAX_GROUP_MEMBERS = 64;
 const MAX_BODY = 16 * 1024;
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
 
-const clients = new Map(); // connectionId -> { res, userId, name }
-const history = [];        // { id, userId, name, text, time }
+const clients = new Map();      // connectionId -> { res, userId, name }
+const knownUsers = new Map();   // userId -> name
+const generalHistory = [];      // messages for the public room
+const dmHistory = new Map();    // "dm:a:b" -> messages
+const groups = new Map();       // groupId -> { id, name, members:Set<userId>, createdBy, time }
+const groupHistory = new Map(); // groupId -> messages
 let nextConnectionId = 1;
 
 const MIME = {
@@ -43,6 +49,15 @@ function send(res, status, body, headers = {}) {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 }
 
+function rememberUser(userId, name) {
+  if (!userId) return;
+  knownUsers.set(userId, name || knownUsers.get(userId) || 'Anonymous');
+}
+
+function userName(userId) {
+  return knownUsers.get(userId) || 'Unknown device';
+}
+
 function onlineUsers() {
   const seen = new Map();
   for (const client of clients.values()) seen.set(client.userId, client.name);
@@ -53,6 +68,152 @@ function broadcast(event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of clients.values()) client.res.write(payload);
 }
+
+/* ---------- Conversations (general, DMs, groups) ---------- */
+
+function dmChannelId(userA, userB) {
+  return `dm:${[userA, userB].sort().map(encodeURIComponent).join(':')}`;
+}
+
+function parseChannel(raw) {
+  const value = typeof raw === 'string' ? raw.trim() : '';
+  if (!value || value === 'general') return { type: 'general' };
+
+  if (value.startsWith('dm:')) {
+    const parts = value.slice(3).split(':');
+    if (parts.length !== 2) return null;
+    let userA;
+    let userB;
+    try {
+      userA = decodeURIComponent(parts[0]);
+      userB = decodeURIComponent(parts[1]);
+    } catch {
+      return null;
+    }
+    if (!userA || !userB) return null;
+    return { type: 'dm', users: [userA, userB].sort() };
+  }
+
+  if (value.startsWith('group:')) {
+    const group = groups.get(value.slice(6));
+    if (!group) return null;
+    return { type: 'group', group };
+  }
+
+  return null;
+}
+
+function channelIdFor(info) {
+  if (info.type === 'general') return 'general';
+  if (info.type === 'dm') return dmChannelId(info.users[0], info.users[1]);
+  return `group:${info.group.id}`;
+}
+
+function canAccess(info, userId) {
+  if (info.type === 'general') return true;
+  if (info.type === 'dm') return info.users.includes(userId);
+  return info.group.members.has(userId);
+}
+
+function channelHistory(info) {
+  if (info.type === 'general') return generalHistory;
+
+  if (info.type === 'dm') {
+    const key = dmChannelId(info.users[0], info.users[1]);
+    if (!dmHistory.has(key)) dmHistory.set(key, []);
+    return dmHistory.get(key);
+  }
+
+  if (!groupHistory.has(info.group.id)) groupHistory.set(info.group.id, []);
+  return groupHistory.get(info.group.id);
+}
+
+function trimHistory(messages) {
+  if (messages.length > MAX_HISTORY) messages.splice(0, messages.length - MAX_HISTORY);
+}
+
+function lastMessageTime(messages) {
+  return messages.length ? messages[messages.length - 1].time : 0;
+}
+
+function conversationsFor(userId) {
+  const list = [
+    { id: 'general', type: 'general', name: 'General', history: generalHistory, lastTime: lastMessageTime(generalHistory) },
+  ];
+
+  for (const [key, messages] of dmHistory) {
+    const info = parseChannel(key);
+    if (!info || info.type !== 'dm' || !info.users.includes(userId)) continue;
+    const peerId = info.users[0] === userId ? info.users[1] : info.users[0];
+    list.push({
+      id: key,
+      type: 'dm',
+      name: userName(peerId),
+      peerId,
+      history: messages,
+      lastTime: lastMessageTime(messages),
+    });
+  }
+
+  for (const group of groups.values()) {
+    if (!group.members.has(userId)) continue;
+    const messages = groupHistory.get(group.id) || [];
+    list.push({
+      id: `group:${group.id}`,
+      type: 'group',
+      name: group.name,
+      groupId: group.id,
+      members: [...group.members].map((id) => ({ id, name: userName(id) })),
+      history: messages,
+      lastTime: lastMessageTime(messages),
+    });
+  }
+
+  return list.sort((a, b) => {
+    if (a.id === 'general') return -1;
+    if (b.id === 'general') return 1;
+    return b.lastTime - a.lastTime;
+  });
+}
+
+function writeToUser(userId, event, data) {
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of clients.values()) {
+    if (client.userId === userId) client.res.write(payload);
+  }
+}
+
+function sendConversationsTo(userId) {
+  writeToUser(userId, 'conversations', { conversations: conversationsFor(userId) });
+}
+
+function refreshConversationsFor(userIds) {
+  const seen = new Set();
+  for (const id of userIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    sendConversationsTo(id);
+  }
+}
+
+function refreshAllConversations() {
+  const ids = new Set([...clients.values()].map((client) => client.userId));
+  refreshConversationsFor(ids);
+}
+
+function deliverMessage(info, message) {
+  if (info.type === 'general') return broadcast('message', message);
+
+  const payload = `event: message\ndata: ${JSON.stringify(message)}\n\n`;
+  for (const client of clients.values()) {
+    const member = info.type === 'dm'
+      ? info.users.includes(client.userId)
+      : info.group.members.has(client.userId);
+    if (member) client.res.write(payload);
+  }
+}
+
+/* ---------- Static files ---------- */
 
 function serveStatic(req, res, pathname) {
   const relative = pathname === '/' ? 'index.html' : pathname.replace(/^\/+/, '');
@@ -74,6 +235,7 @@ function handleEvents(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const userId = cleanText(url.searchParams.get('id'), 64) || `anon-${nextConnectionId}`;
   const name = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
+  rememberUser(userId, name);
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -85,12 +247,15 @@ function handleEvents(req, res) {
 
   const connectionId = nextConnectionId++;
   clients.set(connectionId, { res, userId, name });
-  res.write(`event: init\ndata: ${JSON.stringify({ history, users: onlineUsers() })}\n\n`);
+  const init = { conversations: conversationsFor(userId), users: onlineUsers() };
+  res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
   broadcast('presence', { users: onlineUsers() });
+  refreshAllConversations();
 
   req.on('close', () => {
     clients.delete(connectionId);
     broadcast('presence', { users: onlineUsers() });
+    refreshAllConversations();
   });
 }
 
@@ -132,12 +297,67 @@ async function handleSend(req, res) {
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
   if (!text) return send(res, 400, { error: 'Message is empty' });
 
-  const message = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, userId, name, text, time: Date.now() };
-  history.push(message);
-  if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
+  const info = parseChannel(body.channel);
+  if (!info) return send(res, 400, { error: 'Unknown conversation' });
+  if (!canAccess(info, userId)) return send(res, 403, { error: 'You are not part of this conversation' });
 
-  broadcast('message', message);
+  rememberUser(userId, name);
+
+  const message = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    userId,
+    name,
+    text,
+    time: Date.now(),
+    channel: channelIdFor(info),
+  };
+
+  const history = channelHistory(info);
+  const startsConversation = info.type === 'dm' && history.length === 0;
+  history.push(message);
+  trimHistory(history);
+
+  deliverMessage(info, message);
+  if (startsConversation) refreshConversationsFor(info.users);
   send(res, 200, { ok: true, message });
+}
+
+async function handleCreateGroup(req, res) {
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (err) {
+    return send(res, err.status || 400, { error: err.message });
+  }
+
+  const ownerId = cleanText(body.id, 64);
+  const ownerName = cleanText(body.name, MAX_NAME) || 'Anonymous';
+  const name = cleanText(body.nameValue ?? body.groupName, MAX_GROUP_NAME);
+  if (!ownerId) return send(res, 400, { error: 'Missing sender id' });
+  if (!name) return send(res, 400, { error: 'Group needs a name' });
+
+  const members = new Set([ownerId]);
+  const requested = Array.isArray(body.members) ? body.members : [];
+  for (const memberId of requested.slice(0, MAX_GROUP_MEMBERS)) {
+    const id = cleanText(memberId, 64);
+    if (id) members.add(id);
+  }
+  if (members.size < 2) return send(res, 400, { error: 'Pick at least one other person' });
+
+  rememberUser(ownerId, ownerName);
+
+  const group = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    members,
+    createdBy: ownerId,
+    time: Date.now(),
+  };
+  groups.set(group.id, group);
+  groupHistory.set(group.id, []);
+
+  refreshConversationsFor(members);
+  send(res, 200, { ok: true, group: { id: group.id, name: group.name, channel: `group:${group.id}` } });
 }
 
 const server = http.createServer((req, res) => {
@@ -145,9 +365,16 @@ const server = http.createServer((req, res) => {
 
   if (req.method === 'GET' && pathname === '/events') return handleEvents(req, res);
   if (req.method === 'GET' && pathname === '/api/health') {
-    return send(res, 200, { ok: true, clients: clients.size, messages: history.length });
+    return send(res, 200, {
+      ok: true,
+      clients: clients.size,
+      messages: generalHistory.length,
+      dms: dmHistory.size,
+      groups: groups.size,
+    });
   }
   if (req.method === 'POST' && pathname === '/api/messages') return handleSend(req, res);
+  if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, pathname);
   return send(res, 405, { error: 'Method not allowed' });
 });

@@ -22,10 +22,13 @@
         <div class="status" id="status">Connecting…</div>
 
         <div class="section-head">
-          <h2>Online</h2>
-          <span class="count" id="online-count">0</span>
+          <h2>Chats</h2>
+          <button type="button" id="new-group" class="mini" title="Start a group chat">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+            Group
+          </button>
         </div>
-        <ul class="users" id="users"></ul>
+        <ul class="channels" id="channels"></ul>
 
         <div class="sidebar-footer">
           <div class="me">You are <strong id="me-name">—</strong></div>
@@ -44,17 +47,20 @@
 
       <main class="chat">
         <header class="topbar">
-          <button type="button" id="toggle-users" class="icon" aria-label="Toggle online users">
+          <button type="button" id="toggle-menu" class="icon" aria-label="Toggle chats sidebar">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
           </button>
           <div class="room">
-            <div class="room-icon">#</div>
+            <div class="room-icon" id="room-icon">#</div>
             <div class="room-text">
-              <div class="title">General</div>
+              <div class="title" id="room-title">General</div>
               <div class="sub" id="subtitle">No messages yet</div>
             </div>
           </div>
           <div class="net-pill"><span class="live-dot"></span>LAN</div>
+          <button type="button" id="toggle-members" class="icon" aria-label="Toggle online devices">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 7.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M17 11a3 3 0 1 0-2-5.2M21 19v-1a4 4 0 0 0-3-3.8" /></svg>
+          </button>
         </header>
 
         <div id="messages" class="messages" aria-live="polite"></div>
@@ -76,7 +82,15 @@
         </form>
       </main>
 
-      <button type="button" id="scrim" class="scrim" aria-label="Close online users" tabindex="-1"></button>
+      <aside class="members-panel" id="members-panel">
+        <div class="section-head">
+          <h2>Online</h2>
+          <span class="count" id="online-count">0</span>
+        </div>
+        <ul class="users" id="users"></ul>
+      </aside>
+
+      <button type="button" id="scrim" class="scrim" aria-label="Close panels" tabindex="-1"></button>
     </div>
 
     <div id="name-dialog" class="overlay" hidden>
@@ -86,6 +100,20 @@
         <p>Pick the name the other devices on this network will see.</p>
         <input id="name-input" maxlength="24" placeholder="Your name" autocomplete="nickname" required />
         <button type="submit">Start chatting</button>
+      </form>
+    </div>
+
+    <div id="group-dialog" class="overlay" hidden>
+      <form id="group-form" class="card">
+        <h1>New group chat</h1>
+        <p>Name the group and choose who joins it.</p>
+        <input id="group-name" maxlength="40" placeholder="Group name" autocomplete="off" required />
+        <ul id="group-members" class="member-list"></ul>
+        <div class="form-error" id="group-error" hidden></div>
+        <div class="card-actions">
+          <button type="button" id="group-cancel" class="secondary">Cancel</button>
+          <button type="submit">Create group</button>
+        </div>
       </form>
     </div>
 
