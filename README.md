@@ -23,6 +23,7 @@ Open the LAN address on any phone, tablet or computer connected to the same netw
 - Click any name under **Online** on the right to start a **private message** with that device. Only the two of you see it.
 - Click **Group** to create a named group chat and pick who joins. Group messages only reach its members.
 - Use the paperclip (or drag files onto the composer) to **send files** in the current chat. Recipients get a download link.
+- Open a **private message** and use the phone or camera button in the header to start an **audio or video call**. The other device rings; they can accept or decline. Calls are peer-to-peer (WebRTC) and stay on the local network.
 
 Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
 
@@ -36,5 +37,6 @@ State is kept in memory, so history (last 200 messages per conversation), DMs an
 ## Notes
 
 - If other devices cannot connect, allow Node through the firewall on the port you use (private networks on Windows, for example) and make sure the network does not isolate clients from each other.
+- Calls use `getUserMedia`, which browsers only allow on secure origins. `http://localhost` works on the machine running the server, but phones opening `http://<LAN-IP>:3000` cannot access the microphone/camera. To call from a phone, serve the app over HTTPS (for example with a reverse proxy or a self-signed certificate) and open it via `https://`.
 - Chatterbox has no authentication. Anyone on the LAN who knows the address can read and post messages — run it only on networks you trust.
 - To use it over the internet, put it behind a reverse proxy with TLS; do not expose the port directly.

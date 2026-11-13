@@ -523,6 +523,43 @@ async function handleCreateGroup(req, res) {
   send(res, 200, { ok: true, group: { id: group.id, name: group.name, channel: `group:${group.id}` } });
 }
 
+/* ---------- Call signalling (WebRTC) ---------- */
+
+const SIGNAL_TYPES = new Set(['offer', 'answer', 'ice', 'hangup', 'decline', 'busy']);
+
+async function handleSignal(req, res) {
+  let body;
+  try {
+    body = await readJson(req);
+  } catch (err) {
+    return send(res, err.status || 400, { error: err.message });
+  }
+
+  const fromId = cleanText(body.fromId, 64);
+  const fromName = cleanText(body.fromName, MAX_NAME) || 'Anonymous';
+  const toId = cleanText(body.toId, 64);
+  const callId = cleanText(body.callId, 64);
+  const type = cleanText(body.type, 16);
+
+  if (!fromId || !toId) return send(res, 400, { error: 'Missing caller or recipient id' });
+  if (!callId) return send(res, 400, { error: 'Missing call id' });
+  if (!SIGNAL_TYPES.has(type)) return send(res, 400, { error: 'Unknown signal type' });
+
+  const online = [...clients.values()].some((client) => client.userId === toId);
+  if (!online) return send(res, 409, { error: 'That device is not online' });
+
+  rememberUser(fromId, fromName);
+  writeToUser(toId, 'signal', {
+    fromId,
+    fromName,
+    toId,
+    callId,
+    type,
+    data: body.data ?? null,
+  });
+  send(res, 200, { ok: true });
+}
+
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, 'http://localhost').pathname;
 
@@ -539,6 +576,7 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'POST' && pathname === '/api/messages') return handleSend(req, res);
   if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
+  if (req.method === 'POST' && pathname === '/api/signal') return handleSignal(req, res);
   if (req.method === 'POST' && pathname === '/api/files') return handleFileUpload(req, res);
   if (req.method === 'GET' && pathname.startsWith('/api/files/')) {
     let fileId;
