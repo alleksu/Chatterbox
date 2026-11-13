@@ -15,6 +15,8 @@ const els = {
   composer: document.getElementById('composer'),
   input: document.getElementById('input'),
   send: document.getElementById('send'),
+  attach: document.getElementById('attach'),
+  fileInput: document.getElementById('file-input'),
   roomTitle: document.getElementById('room-title'),
   roomIcon: document.getElementById('room-icon'),
   nameDialog: document.getElementById('name-dialog'),
@@ -68,6 +70,57 @@ function avatarColor(name) {
 
 function formatTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function humanFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024;
+    unit += 1;
+  }
+  return `${size >= 10 || unit === 0 ? Math.round(size) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function fileExtension(name) {
+  const match = /\.([a-z0-9]{1,4})$/i.exec(name || '');
+  return match ? match[1].toUpperCase() : 'FILE';
+}
+
+function buildFileBubble(message) {
+  const { file } = message;
+  const wrap = document.createElement('div');
+  wrap.className = 'file-msg';
+
+  const icon = document.createElement('div');
+  icon.className = 'file-icon';
+  icon.textContent = fileExtension(file.name);
+
+  const meta = document.createElement('div');
+  meta.className = 'file-meta';
+
+  const name = document.createElement('span');
+  name.className = 'file-name';
+  name.textContent = file.name;
+  name.title = file.name;
+
+  const size = document.createElement('span');
+  size.className = 'file-size';
+  size.textContent = humanFileSize(file.size);
+
+  meta.append(name, size);
+
+  const download = document.createElement('a');
+  download.className = 'file-download';
+  download.textContent = 'Download';
+  download.href = `/api/files/${encodeURIComponent(file.id)}?id=${encodeURIComponent(me.id)}`;
+  download.download = file.name;
+
+  wrap.append(icon, meta, download);
+  return wrap;
 }
 
 function setStatus(text, state) {
@@ -153,7 +206,8 @@ function appendMessageRow(message, { scroll = true } = {}) {
   text.className = 'msg-text';
   text.textContent = message.text;
 
-  body.append(head, text);
+  if (message.kind === 'file' && message.file) body.append(head, buildFileBubble(message));
+  else body.append(head, text);
   row.append(avatar, body);
 
   const stick = scroll && isNearBottom();
@@ -503,6 +557,7 @@ function connect() {
 }
 
 async function sendMessage() {
+  if (uploadInProgress) return;
   const text = els.input.value.trim();
   const conversation = getConversation(activeId);
   if (!text || !conversation) return;
@@ -537,6 +592,84 @@ async function sendMessage() {
 function autoResize() {
   els.input.style.height = 'auto';
   els.input.style.height = `${Math.min(els.input.scrollHeight, 160)}px`;
+}
+
+function uploadFile(file, conversation) {
+  return new Promise((resolve, reject) => {
+    const params = new URLSearchParams({
+      id: me.id,
+      name: me.name,
+      channel: conversation.id,
+      filename: file.name,
+      type: file.type || 'application/octet-stream',
+    });
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/files?${params}`);
+    xhr.responseType = 'json';
+
+    xhr.upload.addEventListener('progress', (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.round((event.loaded / event.total) * 100);
+      setStatus(`Uploading ${file.name} — ${percent}%`, '');
+    });
+
+    xhr.addEventListener('load', () => {
+      const data = xhr.response || {};
+      if (xhr.status >= 200 && xhr.status < 300 && data.ok) resolve(data);
+      else reject(new Error(data.error || `Server responded ${xhr.status}`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+
+    xhr.send(file);
+  });
+}
+
+let uploadInProgress = false;
+let statusTimer = null;
+
+function restoreConnectionStatus() {
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    if (source && source.readyState === EventSource.OPEN) {
+      setStatus(`Connected · ${location.host}`, 'connected');
+    }
+  }, 2500);
+}
+
+async function sendFiles(fileList) {
+  const files = [...fileList];
+  if (files.length === 0) return;
+  if (uploadInProgress) {
+    setStatus('Please wait for the current transfer to finish…', 'offline');
+    return;
+  }
+
+  const conversation = getConversation(activeId);
+  if (!conversation) return;
+
+  uploadInProgress = true;
+  els.attach.disabled = true;
+  els.send.disabled = true;
+
+  try {
+    for (const file of files) {
+      try {
+        await uploadFile(file, conversation);
+        setStatus(`Sent ${file.name}`, 'connected');
+      } catch (error) {
+        setStatus(`Upload failed: ${error.message}`, 'offline');
+        break;
+      }
+    }
+  } finally {
+    uploadInProgress = false;
+    els.attach.disabled = false;
+    els.send.disabled = false;
+    els.input.focus();
+    restoreConnectionStatus();
+  }
 }
 
 function openGroupDialog() {
@@ -631,6 +764,40 @@ async function createGroup(event) {
 els.composer.addEventListener('submit', (event) => {
   event.preventDefault();
   sendMessage();
+});
+
+els.attach.addEventListener('click', () => els.fileInput.click());
+
+els.fileInput.addEventListener('change', () => {
+  const files = [...els.fileInput.files];
+  els.fileInput.value = '';
+  sendFiles(files);
+});
+
+let dragDepth = 0;
+
+els.composer.addEventListener('dragenter', (event) => {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+  dragDepth += 1;
+  els.composer.classList.add('drag');
+});
+
+els.composer.addEventListener('dragover', (event) => {
+  if (!event.dataTransfer?.types.includes('Files')) return;
+  event.preventDefault();
+});
+
+els.composer.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) els.composer.classList.remove('drag');
+});
+
+els.composer.addEventListener('drop', (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  els.composer.classList.remove('drag');
+  if (event.dataTransfer?.files?.length) sendFiles(event.dataTransfer.files);
 });
 
 els.input.addEventListener('keydown', (event) => {

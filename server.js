@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -12,8 +13,21 @@ const MAX_NAME = 24;
 const MAX_GROUP_NAME = 40;
 const MAX_GROUP_MEMBERS = 64;
 const MAX_BODY = 16 * 1024;
+const MAX_FILE_MB = Number(process.env.MAX_FILE_MB) || 100;
+const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const filesDir = path.join(os.tmpdir(), `chatterbox-files-${PORT}`);
+
+// Start from a clean slate — conversation state does not survive a restart either.
+fs.mkdirSync(filesDir, { recursive: true });
+for (const name of fs.readdirSync(filesDir)) {
+  try {
+    fs.rmSync(path.join(filesDir, name), { recursive: true, force: true });
+  } catch {
+    // Ignore files that are still locked by another process.
+  }
+}
 
 const clients = new Map();      // connectionId -> { res, userId, name }
 const knownUsers = new Map();   // userId -> name
@@ -21,6 +35,7 @@ const generalHistory = [];      // messages for the public room
 const dmHistory = new Map();    // "dm:a:b" -> messages
 const groups = new Map();       // groupId -> { id, name, members:Set<userId>, createdBy, time }
 const groupHistory = new Map(); // groupId -> messages
+const files = new Map();        // fileId -> { id, name, type, size, path, channel, ownerId, time }
 let nextConnectionId = 1;
 
 const MIME = {
@@ -129,7 +144,22 @@ function channelHistory(info) {
 }
 
 function trimHistory(messages) {
-  if (messages.length > MAX_HISTORY) messages.splice(0, messages.length - MAX_HISTORY);
+  if (messages.length <= MAX_HISTORY) return;
+  const removed = messages.splice(0, messages.length - MAX_HISTORY);
+  for (const message of removed) {
+    if (message.kind === 'file' && message.file?.id) deleteFileRecord(message.file.id);
+  }
+}
+
+function messageId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function cleanFilename(value) {
+  const name = cleanText(typeof value === 'string' ? value : '', 140)
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/^\.+/, '');
+  return name || 'file';
 }
 
 function lastMessageTime(messages) {
@@ -211,6 +241,145 @@ function deliverMessage(info, message) {
       : info.group.members.has(client.userId);
     if (member) client.res.write(payload);
   }
+}
+
+function publishMessage(info, message) {
+  const history = channelHistory(info);
+  const startsConversation = info.type === 'dm' && history.length === 0;
+  history.push(message);
+  trimHistory(history);
+  deliverMessage(info, message);
+  if (startsConversation) refreshConversationsFor(info.users);
+  return message;
+}
+
+/* ---------- Stored files ---------- */
+
+function deleteFileRecord(fileId) {
+  const record = files.get(fileId);
+  if (!record) return;
+  files.delete(fileId);
+  fs.unlink(record.path, () => {});
+}
+
+function receiveFile(req, filePath) {
+  return new Promise((resolve, reject) => {
+    const out = fs.createWriteStream(filePath);
+    let size = 0;
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      req.unpipe(out);
+      out.destroy();
+      reject(error);
+    };
+
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_FILE_BYTES) {
+        fail(Object.assign(new Error(`File is larger than ${MAX_FILE_MB} MB`), { status: 413 }));
+      }
+    });
+    req.on('aborted', () => fail(Object.assign(new Error('Upload aborted'), { status: 400 })));
+    req.on('error', fail);
+    out.on('error', fail);
+    out.on('finish', () => {
+      if (settled) return;
+      settled = true;
+      resolve(size);
+    });
+
+    req.pipe(out);
+  });
+}
+
+async function handleFileUpload(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const userId = cleanText(url.searchParams.get('id'), 64);
+  const senderName = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
+  const filename = cleanFilename(url.searchParams.get('filename'));
+  const type = cleanText(url.searchParams.get('type'), 120) || 'application/octet-stream';
+  const info = parseChannel(url.searchParams.get('channel'));
+
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  if (!info) return send(res, 400, { error: 'Unknown conversation' });
+  if (!canAccess(info, userId)) return send(res, 403, { error: 'You are not part of this conversation' });
+
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared > MAX_FILE_BYTES) {
+    req.resume();
+    return send(res, 413, { error: `File is larger than ${MAX_FILE_MB} MB` });
+  }
+
+  rememberUser(userId, senderName);
+
+  const fileId = randomUUID();
+  const filePath = path.join(filesDir, fileId);
+  let size;
+  try {
+    size = await receiveFile(req, filePath);
+  } catch (error) {
+    fs.unlink(filePath, () => {});
+    return send(res, error.status || 400, { error: error.message });
+  }
+
+  if (!size) {
+    fs.unlink(filePath, () => {});
+    return send(res, 400, { error: 'File is empty' });
+  }
+
+  const channel = channelIdFor(info);
+  const file = { id: fileId, name: filename, type, size };
+  files.set(fileId, { ...file, path: filePath, channel, ownerId: userId, time: Date.now() });
+
+  const message = {
+    id: messageId(),
+    userId,
+    name: senderName,
+    text: filename,
+    time: Date.now(),
+    channel,
+    kind: 'file',
+    file,
+  };
+
+  publishMessage(info, message);
+  send(res, 200, { ok: true, message });
+}
+
+function contentDisposition(name) {
+  const fallback = name.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_') || 'file';
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+function handleFileDownload(req, res, fileId) {
+  const url = new URL(req.url, 'http://localhost');
+  const userId = cleanText(url.searchParams.get('id'), 64);
+  const record = files.get(fileId);
+  if (!record) return send(res, 404, { error: 'File not found' });
+
+  const info = parseChannel(record.channel);
+  if (!info) return send(res, 404, { error: 'File not found' });
+  if (info.type !== 'general' && (!userId || !canAccess(info, userId))) {
+    return send(res, 403, { error: 'You are not part of this conversation' });
+  }
+
+  res.writeHead(200, {
+    'Content-Type': record.type || 'application/octet-stream',
+    'Content-Length': record.size,
+    'Content-Disposition': contentDisposition(record.name),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+
+  const stream = fs.createReadStream(record.path);
+  stream.on('error', () => {
+    if (res.headersSent) res.destroy();
+    else send(res, 500, { error: 'Could not read file' });
+  });
+  stream.pipe(res);
 }
 
 /* ---------- Static files ---------- */
@@ -304,7 +473,7 @@ async function handleSend(req, res) {
   rememberUser(userId, name);
 
   const message = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: messageId(),
     userId,
     name,
     text,
@@ -312,13 +481,7 @@ async function handleSend(req, res) {
     channel: channelIdFor(info),
   };
 
-  const history = channelHistory(info);
-  const startsConversation = info.type === 'dm' && history.length === 0;
-  history.push(message);
-  trimHistory(history);
-
-  deliverMessage(info, message);
-  if (startsConversation) refreshConversationsFor(info.users);
+  publishMessage(info, message);
   send(res, 200, { ok: true, message });
 }
 
@@ -371,10 +534,21 @@ const server = http.createServer((req, res) => {
       messages: generalHistory.length,
       dms: dmHistory.size,
       groups: groups.size,
+      files: files.size,
     });
   }
   if (req.method === 'POST' && pathname === '/api/messages') return handleSend(req, res);
   if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
+  if (req.method === 'POST' && pathname === '/api/files') return handleFileUpload(req, res);
+  if (req.method === 'GET' && pathname.startsWith('/api/files/')) {
+    let fileId;
+    try {
+      fileId = decodeURIComponent(pathname.slice('/api/files/'.length));
+    } catch {
+      return send(res, 400, { error: 'Invalid file id' });
+    }
+    return handleFileDownload(req, res, fileId);
+  }
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, pathname);
   return send(res, 405, { error: 'Method not allowed' });
 });

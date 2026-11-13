@@ -22,15 +22,16 @@ Open the LAN address on any phone, tablet or computer connected to the same netw
 - **General** is the public room every device shares.
 - Click any name under **Online** on the right to start a **private message** with that device. Only the two of you see it.
 - Click **Group** to create a named group chat and pick who joins. Group messages only reach its members.
+- Use the paperclip (or drag files onto the composer) to **send files** in the current chat. Recipients get a download link.
 
-Set a different port with `PORT=4000 npm start`.
+Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
 
 ## How it works
 
-- `server.js` — Node HTTP server. Serves the static page and streams events to browsers with Server-Sent Events (`GET /events`). Messages are posted to `POST /api/messages` with a channel (`general`, `dm:<a>:<b>` or `group:<id>`), and groups are created with `POST /api/groups`. Each message is delivered only to the conversation's participants.
+- `server.js` — Node HTTP server. Serves the static page and streams events to browsers with Server-Sent Events (`GET /events`). Messages are posted to `POST /api/messages` with a channel (`general`, `dm:<a>:<b>` or `group:<id>`), and groups are created with `POST /api/groups`. Files are streamed to `POST /api/files` and downloaded from `GET /api/files/:id`; each message is delivered only to the conversation's participants.
 - `public/` — the Chatterbox UI.
 
-State is kept in memory, so history (last 200 messages per conversation), DMs and groups are lost when the server restarts.
+State is kept in memory, so history (last 200 messages per conversation), DMs and groups are lost when the server restarts. Uploaded files are stored in the OS temp folder and cleared on startup.
 
 ## Notes
 
