@@ -1,0 +1,10 @@
+{
+  "name": "lan-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local web chat for devices on the same LAN",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
