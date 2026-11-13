@@ -1,8 +1,8 @@
 {
-  "name": "lan-chat",
+  "name": "chatterbox",
   "version": "1.0.0",
   "private": true,
-  "description": "Local web chat for devices on the same LAN",
+  "description": "Chatterbox — local web chat for devices on the same LAN",
   "type": "module",
   "scripts": {
     "start": "node server.js"

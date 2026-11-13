@@ -18,7 +18,8 @@ const els = {
   changeName: document.getElementById('change-name'),
   copyLink: document.getElementById('copy-link'),
   toggleUsers: document.getElementById('toggle-users'),
-  app: document.querySelector('.app'),
+  scrim: document.getElementById('scrim'),
+  app: document.getElementById('app'),
 };
 
 function getDeviceId() {
@@ -46,7 +47,7 @@ function initials(name) {
 function avatarColor(name) {
   let hash = 0;
   for (const char of name) hash = (hash * 31 + char.codePointAt(0)) % 360;
-  return `hsl(${hash} 62% 58%)`;
+  return `hsl(${hash} 68% 64%)`;
 }
 
 function formatTime(timestamp) {
@@ -71,9 +72,15 @@ function showEmptyState() {
   if (messageCount > 0) return;
   const empty = document.createElement('div');
   empty.className = 'empty';
+
+  const logo = document.createElement('img');
+  logo.src = '/logo.svg';
+  logo.alt = '';
+
   const title = document.createElement('strong');
-  title.textContent = 'This room is quiet';
-  empty.append(title, 'Send the first message — everyone who opens this address on the same network will see it.');
+  title.textContent = 'Welcome to Chatterbox';
+
+  empty.append(logo, title, 'Send the first message — everyone who opens this address on the same network will see it instantly.');
   els.messages.replaceChildren(empty);
 }
 
@@ -262,6 +269,7 @@ els.copyLink.addEventListener('click', async () => {
 });
 
 els.toggleUsers.addEventListener('click', () => els.app.classList.toggle('users-open'));
+els.scrim.addEventListener('click', () => els.app.classList.remove('users-open'));
 
 els.users.addEventListener('click', () => {
   if (window.matchMedia('(max-width: 720px)').matches) els.app.classList.remove('users-open');
