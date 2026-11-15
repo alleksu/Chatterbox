@@ -2,9 +2,11 @@
   "name": "chatterbox",
   "version": "1.0.0",
   "private": true,
-  "description": "Chatterbox — local web chat for devices on the same LAN",
+  "description": "Chatterbox - local web chat for devices on the same LAN",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:https": "node scripts/https.mjs",
+    "cert": "node scripts/generate-cert.mjs"
   }
 }

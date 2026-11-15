@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -16,9 +17,16 @@ const MAX_BODY = 32 * 1024;
 const MAX_FILE_MB = Number(process.env.MAX_FILE_MB) || 100;
 const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 const TYPING_TTL = 6000;
+const MAX_SEARCH_RESULTS = 60;
+const MAX_CALL_HISTORY = 50;
 
-const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'public');
+const appDir = path.dirname(fileURLToPath(import.meta.url));
+const publicDir = path.join(appDir, 'public');
 const filesDir = path.join(os.tmpdir(), `chatterbox-files-${PORT}`);
+const USE_HTTPS = process.env.HTTPS === '1' || String(process.env.HTTPS).toLowerCase() === 'true';
+const tlsCertPath = path.resolve(process.env.TLS_CERT || path.join(appDir, 'certs', 'cert.pem'));
+const tlsKeyPath = path.resolve(process.env.TLS_KEY || path.join(appDir, 'certs', 'key.pem'));
+const scheme = USE_HTTPS ? 'https' : 'http';
 
 fs.mkdirSync(filesDir, { recursive: true });
 for (const name of fs.readdirSync(filesDir)) {
@@ -35,8 +43,12 @@ const generalHistory = [];      // messages for the public room
 const dmHistory = new Map();    // "dm:a:b" -> messages
 const groups = new Map();       // groupId -> { id, name, members:Set<userId>, createdBy, time }
 const groupHistory = new Map(); // groupId -> messages
+const rooms = new Map();        // roomId -> { id, name, createdBy, time }
+const roomHistory = new Map();  // roomId -> messages
 const files = new Map();        // fileId -> { id, name, type, size, path, channel, ownerId, time }
 const typing = new Map();       // channelId -> Map<userId, expiresAt>
+const callSessions = new Map(); // callId -> call metadata
+const callHistory = new Map();  // userId -> [callId]
 let nextConnectionId = 1;
 
 const MIME = {
@@ -44,6 +56,7 @@ const MIME = {
   '.css': 'text/css; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -122,18 +135,25 @@ function parseChannel(raw) {
     return { type: 'group', id: `group:${group.id}`, group };
   }
 
+  if (value.startsWith('room:')) {
+    const room = rooms.get(value.slice(5));
+    if (!room) return null;
+    return { type: 'room', id: `room:${room.id}`, room };
+  }
+
   return null;
 }
 
 function channelIdFor(info) {
   if (info.type === 'general') return 'general';
   if (info.type === 'dm') return dmChannelId(info.users[0], info.users[1]);
+  if (info.type === 'room') return `room:${info.room.id}`;
   return `group:${info.group.id}`;
 }
 
 function canAccess(info, userId) {
   if (!info) return false;
-  if (info.type === 'general') return true;
+  if (info.type === 'general' || info.type === 'room') return true;
   if (!userId) return false;
   if (info.type === 'dm') return info.users.includes(userId);
   return info.group.members.has(userId);
@@ -146,6 +166,11 @@ function channelHistory(info) {
     const key = channelIdFor(info);
     if (!dmHistory.has(key)) dmHistory.set(key, []);
     return dmHistory.get(key);
+  }
+
+  if (info.type === 'room') {
+    if (!roomHistory.has(info.room.id)) roomHistory.set(info.room.id, []);
+    return roomHistory.get(info.room.id);
   }
 
   if (!groupHistory.has(info.group.id)) groupHistory.set(info.group.id, []);
@@ -201,6 +226,18 @@ function conversationsFor(userId) {
       name: userName(peerId),
       peerId,
       online: [...clients.values()].some((client) => client.userId === peerId),
+      history: messages,
+      lastTime: lastMessageTime(messages),
+    });
+  }
+
+  for (const room of rooms.values()) {
+    const messages = roomHistory.get(room.id) || [];
+    list.push({
+      id: `room:${room.id}`,
+      type: 'room',
+      name: room.name,
+      roomId: room.id,
       history: messages,
       lastTime: lastMessageTime(messages),
     });
@@ -486,6 +523,8 @@ function handleEvents(req, res) {
   const init = {
     conversations: conversationsFor(userId),
     users: onlineUsers(),
+    mentions: mentionsFor(userId),
+    calls: callsFor(userId),
     config: { maxFileMB: MAX_FILE_MB, maxText: MAX_TEXT, maxName: MAX_NAME, maxGroupName: MAX_GROUP_NAME },
   };
   res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
@@ -544,6 +583,42 @@ function buildReplyPreview(info, rawId, authorId) {
   };
 }
 
+function mentionCandidates(info) {
+  if (info.type === 'dm') return new Set(info.users);
+  if (info.type === 'group') return new Set(info.group.members);
+  return new Set(knownUsers.keys());
+}
+
+function normalizeMentions(info, raw, authorId) {
+  if (!Array.isArray(raw)) return [];
+  const allowed = mentionCandidates(info);
+  const result = [];
+  for (const value of raw.slice(0, 20)) {
+    const id = cleanText(value, 64);
+    if (!id || id === authorId || result.includes(id) || !allowed.has(id)) continue;
+    result.push(id);
+  }
+  return result;
+}
+
+function mentionsFor(userId) {
+  if (!userId) return [];
+  const found = [];
+  for (const conversation of conversationsFor(userId)) {
+    for (const message of conversation.history) {
+      if (!Array.isArray(message.mentions) || !message.mentions.includes(userId)) continue;
+      found.push({
+        channel: conversation.id,
+        messageId: message.id,
+        name: message.name,
+        preview: (message.kind === 'file' ? message.file?.name : message.text || '').slice(0, 140),
+        time: message.time,
+      });
+    }
+  }
+  return found.sort((a, b) => b.time - a.time).slice(0, 50);
+}
+
 async function handleSend(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
@@ -568,6 +643,7 @@ async function handleSend(req, res) {
     time: Date.now(),
     channel: channelIdFor(info),
     replyTo: buildReplyPreview(info, body.replyTo, userId),
+    mentions: normalizeMentions(info, body.mentions, userId),
     readBy: [],
   };
 
@@ -594,6 +670,7 @@ async function handleEdit(req, res) {
 
   message.text = text;
   message.editedAt = Date.now();
+  message.mentions = normalizeMentions(info, body.mentions, userId);
   rememberUser(userId, message.name);
   deliverToChannel(info, 'message', message);
   send(res, 200, { ok: true, message });
@@ -656,6 +733,202 @@ async function handleCreateGroup(req, res) {
 
   refreshConversationsFor(members);
   send(res, 200, { ok: true, group: { id: group.id, name: group.name, channel: `group:${group.id}` } });
+}
+
+async function handleCreateRoom(req, res) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+
+  const userId = cleanText(body.id, 64);
+  const name = cleanText(body.name ?? body.roomName ?? body.nameValue, MAX_GROUP_NAME);
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  if (!name) return send(res, 400, { error: 'Room needs a name' });
+
+  const room = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    createdBy: userId,
+    time: Date.now(),
+  };
+  rooms.set(room.id, room);
+  roomHistory.set(room.id, []);
+  rememberUser(userId, cleanText(body.displayName, MAX_NAME));
+  refreshAllConversations();
+  send(res, 200, { ok: true, room: { id: room.id, name: room.name, channel: `room:${room.id}` } });
+}
+
+async function handlePin(req, res) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+
+  const userId = cleanText(body.userId ?? body.id, 64);
+  const info = parseChannel(body.channel);
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  if (!info) return send(res, 400, { error: 'Unknown conversation' });
+  if (!canAccess(info, userId)) return send(res, 403, { error: 'You are not part of this conversation' });
+
+  const message = findMessage(info, cleanText(body.messageId, 64));
+  if (!message) return send(res, 404, { error: 'Message not found' });
+
+  if (body.action === 'remove') {
+    message.pinnedAt = null;
+    message.pinnedBy = null;
+  } else {
+    message.pinnedAt = Date.now();
+    message.pinnedBy = userId;
+  }
+
+  deliverToChannel(info, 'message', message);
+  send(res, 200, { ok: true, message });
+}
+
+function searchableConversations(userId, channel) {
+  if (channel) {
+    const info = parseChannel(channel);
+    if (!info || !canAccess(info, userId)) return [];
+    const conversation = conversationsFor(userId).find((entry) => entry.id === channelIdFor(info));
+    if (!conversation) return [];
+    return [conversation];
+  }
+  return conversationsFor(userId);
+}
+
+function handleSearch(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const userId = cleanText(url.searchParams.get('id'), 64);
+  const query = cleanText(url.searchParams.get('q'), 160).toLowerCase();
+  const channel = cleanText(url.searchParams.get('channel'), 160);
+  if (!query) return send(res, 200, { results: [], query: '' });
+
+  const results = [];
+  for (const conversation of searchableConversations(userId, channel)) {
+    for (const message of conversation.history) {
+      const haystack = [
+        message.text,
+        message.name,
+        message.file?.name,
+        message.replyTo?.text,
+      ]
+        .filter(Boolean)
+        .join('\n')
+        .toLowerCase();
+      if (!haystack.includes(query)) continue;
+      results.push({
+        channel: conversation.id,
+        channelName: conversation.name,
+        channelType: conversation.type,
+        messageId: message.id,
+        userId: message.userId,
+        name: message.name,
+        text: message.kind === 'file' ? message.file?.name || '' : message.text || '',
+        kind: message.kind || 'text',
+        file: message.file || null,
+        time: message.time,
+      });
+    }
+  }
+
+  results.sort((a, b) => b.time - a.time);
+  send(res, 200, { results: results.slice(0, MAX_SEARCH_RESULTS), query, truncated: results.length > MAX_SEARCH_RESULTS });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[char]);
+}
+
+function sendExport(res, body, type, filename) {
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Disposition': contentDisposition(filename, false),
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  res.end(body);
+}
+
+function handleExport(req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  const userId = cleanText(url.searchParams.get('id'), 64);
+  const format = url.searchParams.get('format') === 'html' ? 'html' : 'json';
+  const info = parseChannel(url.searchParams.get('channel'));
+  if (!info) return send(res, 400, { error: 'Unknown conversation' });
+  if (!canAccess(info, userId)) return send(res, 403, { error: 'You are not part of this conversation' });
+
+  const conversation = conversationsFor(userId).find((entry) => entry.id === channelIdFor(info));
+  if (!conversation) return send(res, 404, { error: 'Conversation not found' });
+
+  const baseName = cleanFilename(conversation.name).replace(/\.[a-z0-9]{1,8}$/i, '') || 'conversation';
+  const exportedAt = new Date().toISOString();
+  const messages = conversation.history.map((message) => ({
+    id: message.id,
+    time: message.time,
+    name: message.name,
+    userId: message.userId,
+    text: message.text,
+    kind: message.kind || 'text',
+    file: message.file || null,
+    replyTo: message.replyTo || null,
+    mentions: message.mentions || [],
+    reactions: message.reactions || null,
+    editedAt: message.editedAt || null,
+    pinnedAt: message.pinnedAt || null,
+  }));
+
+  if (format === 'json') {
+    const payload = {
+      conversation: { id: conversation.id, name: conversation.name, type: conversation.type },
+      exportedAt,
+      messages,
+    };
+    return sendExport(
+      res,
+      JSON.stringify(payload, null, 2),
+      'application/json; charset=utf-8',
+      `${baseName}.json`,
+    );
+  }
+
+  const rows = messages
+    .map((message) => {
+      const when = new Date(message.time).toLocaleString();
+      const text = message.kind === 'file'
+        ? `Attachment: ${message.file?.name || 'file'}`
+        : message.text || '';
+      return `<article><header><strong>${escapeHtml(message.name)}</strong><time>${escapeHtml(when)}</time></header><p>${escapeHtml(text).replace(/\n/g, '<br>')}</p>${message.pinnedAt ? '<small>Pinned</small>' : ''}</article>`;
+    })
+    .join('\n');
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(conversation.name)} - Chatterbox export</title>
+<style>
+  body{font:16px/1.5 system-ui,sans-serif;max-width:760px;margin:40px auto;padding:0 20px;color:#1f2937;background:#fff}
+  h1{font-size:1.6rem;margin-bottom:.25rem}
+  .meta{color:#6b7280;margin-top:0}
+  article{padding:14px 0;border-bottom:1px solid #e5e7eb}
+  header{display:flex;justify-content:space-between;gap:16px;align-items:baseline}
+  time{color:#6b7280;font-size:.8rem;white-space:nowrap}
+  p{margin:.4rem 0;white-space:normal;overflow-wrap:anywhere}
+  small{color:#7c5c12;background:#fef3c7;padding:2px 6px;border-radius:999px}
+</style>
+</head>
+<body>
+<h1>${escapeHtml(conversation.name)}</h1>
+<p class="meta">Chatterbox export · ${escapeHtml(exportedAt)} · ${messages.length} messages</p>
+${rows}
+</body>
+</html>`;
+
+  return sendExport(res, html, 'text/html; charset=utf-8', `${baseName}.html`);
 }
 
 /* ---------- Reactions, read receipts ---------- */
@@ -732,6 +1005,89 @@ async function handleTyping(req, res) {
 
 const SIGNAL_TYPES = new Set(['offer', 'answer', 'ice', 'hangup', 'decline', 'busy']);
 
+function callsFor(userId) {
+  const entries = callHistory.get(userId) || [];
+  return entries
+    .map((callId) => callSessions.get(callId))
+    .filter((record) => record && (record.fromId === userId || record.toId === userId))
+    .map((record) => ({
+      callId: record.callId,
+      direction: record.fromId === userId ? 'outgoing' : 'incoming',
+      peerId: record.fromId === userId ? record.toId : record.fromId,
+      peerName: record.fromId === userId ? record.toName : record.fromName,
+      withVideo: record.withVideo,
+      state: record.state,
+      createdAt: record.createdAt,
+      answeredAt: record.answeredAt,
+      endedAt: record.endedAt,
+      duration: record.duration,
+    }))
+    .sort((a, b) => b.createdAt - a.createdAt);
+}
+
+function rememberCallFor(userId, callId) {
+  if (!userId || !callId) return;
+  let ids = callHistory.get(userId);
+  if (!ids) {
+    ids = [];
+    callHistory.set(userId, ids);
+  }
+  if (!ids.includes(callId)) ids.unshift(callId);
+  while (ids.length > MAX_CALL_HISTORY) ids.pop();
+}
+
+function refreshCallsFor(record) {
+  for (const userId of new Set([record.fromId, record.toId])) {
+    writeToUser(userId, 'calls', { calls: callsFor(userId) });
+  }
+}
+
+function finishCallRecord(callId, type) {
+  const record = callSessions.get(callId);
+  if (!record || record.endedAt) return null;
+  record.endedAt = Date.now();
+  record.duration = Math.max(0, Math.round((record.endedAt - (record.answeredAt || record.createdAt)) / 1000));
+  record.state = type === 'decline' ? 'declined' : type === 'busy' ? 'busy' : 'ended';
+  rememberCallFor(record.fromId, record.callId);
+  rememberCallFor(record.toId, record.callId);
+  refreshCallsFor(record);
+  return record;
+}
+
+function trackCallSignal(type, { fromId, fromName, toId, callId, data }) {
+  if (type === 'ice') return;
+  const existing = callSessions.get(callId);
+
+  if (type === 'offer') {
+    if (existing) return;
+    const record = {
+      callId,
+      fromId,
+      fromName,
+      toId,
+      toName: userName(toId),
+      withVideo: Boolean(data && /m=video/.test(data.sdp || '')),
+      state: 'ringing',
+      createdAt: Date.now(),
+      answeredAt: 0,
+      endedAt: 0,
+      duration: 0,
+    };
+    callSessions.set(callId, record);
+    return;
+  }
+
+  if (!existing) return;
+  if (type === 'answer') {
+    if (existing.state !== 'ringing') return;
+    existing.state = 'active';
+    existing.answeredAt = Date.now();
+    return;
+  }
+
+  if (type === 'hangup' || type === 'decline' || type === 'busy') finishCallRecord(callId, type);
+}
+
 async function handleSignal(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
@@ -750,6 +1106,7 @@ async function handleSignal(req, res) {
   if (!online) return send(res, 409, { error: 'That device is not online' });
 
   rememberUser(fromId, fromName);
+  trackCallSignal(type, { fromId, fromName, toId, callId, data: body.data ?? null });
   writeToUser(toId, 'signal', {
     fromId,
     fromName,
@@ -761,7 +1118,7 @@ async function handleSignal(req, res) {
   send(res, 200, { ok: true });
 }
 
-const server = http.createServer((req, res) => {
+function requestHandler(req, res) {
   const pathname = new URL(req.url, 'http://localhost').pathname;
 
   if (req.method === 'GET' && pathname === '/events') return handleEvents(req, res);
@@ -772,18 +1129,30 @@ const server = http.createServer((req, res) => {
       messages: generalHistory.length,
       dms: dmHistory.size,
       groups: groups.size,
+      rooms: rooms.size,
+      calls: callSessions.size,
       files: files.size,
     });
   }
   if (req.method === 'POST' && pathname === '/api/messages') return handleSend(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/edit') return handleEdit(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/delete') return handleDelete(req, res);
+  if (req.method === 'POST' && pathname === '/api/messages/pin') return handlePin(req, res);
   if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
+  if (req.method === 'POST' && pathname === '/api/rooms') return handleCreateRoom(req, res);
   if (req.method === 'POST' && pathname === '/api/signal') return handleSignal(req, res);
   if (req.method === 'POST' && pathname === '/api/files') return handleFileUpload(req, res);
   if (req.method === 'POST' && pathname === '/api/reactions') return handleReactions(req, res);
   if (req.method === 'POST' && pathname === '/api/read-receipt') return handleReadReceipt(req, res);
   if (req.method === 'POST' && pathname === '/api/typing') return handleTyping(req, res);
+  if (req.method === 'GET' && pathname === '/api/search') return handleSearch(req, res);
+  if (req.method === 'GET' && pathname === '/api/export') return handleExport(req, res);
+  if (req.method === 'GET' && pathname === '/api/calls') {
+    const url = new URL(req.url, 'http://localhost');
+    const userId = cleanText(url.searchParams.get('id'), 64);
+    if (!userId) return send(res, 400, { error: 'Missing user id' });
+    return send(res, 200, { calls: callsFor(userId) });
+  }
   if (req.method === 'GET' && pathname.startsWith('/api/files/')) {
     let fileId;
     try {
@@ -795,7 +1164,22 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, pathname);
   return send(res, 405, { error: 'Method not allowed' });
-});
+}
+
+let server;
+if (USE_HTTPS) {
+  try {
+    server = https.createServer(
+      { cert: fs.readFileSync(tlsCertPath), key: fs.readFileSync(tlsKeyPath) },
+      requestHandler,
+    );
+  } catch (error) {
+    console.error(`Could not start HTTPS. Missing or unreadable TLS certificate/key.\n  cert: ${tlsCertPath}\n  key:  ${tlsKeyPath}\n${error.message}`);
+    process.exit(1);
+  }
+} else {
+  server = http.createServer(requestHandler);
+}
 
 setInterval(() => {
   for (const client of clients.values()) client.res.write(': ping\n\n');
@@ -825,9 +1209,10 @@ server.listen(PORT, HOST, () => {
     .filter((iface) => iface && iface.family === 'IPv4' && !iface.internal)
     .map((iface) => iface.address);
 
-  console.log('Chatterbox is running. Open one of these on any device on the same network:\n');
-  console.log(`  On this machine:  http://localhost:${PORT}`);
-  for (const address of addresses) console.log(`  On the LAN:       http://${address}:${PORT}`);
+  console.log(`Chatterbox is running${USE_HTTPS ? ' with HTTPS' : ''}. Open one of these on any device on the same network:\n`);
+  console.log(`  On this machine:  ${scheme}://localhost:${PORT}`);
+  for (const address of addresses) console.log(`  On the LAN:       ${scheme}://${address}:${PORT}`);
+  if (USE_HTTPS) console.log('\n  The certificate is self-signed unless you supplied your own. Accept the browser warning once per device.');
   if (addresses.length === 0) console.log('  No LAN address found — check your network connection.');
   console.log('\nPress Ctrl+C to stop.');
 });

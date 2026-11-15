@@ -5,6 +5,10 @@ const SEEN_KEY = 'lanchat.seen';
 const THEME_KEY = 'lanchat.theme';
 const SOUND_KEY = 'lanchat.sound';
 const NOTIFY_KEY = 'lanchat.notify';
+const DRAFT_KEY = 'lanchat.drafts';
+const MIC_KEY = 'lanchat.mic';
+const CAM_KEY = 'lanchat.cam';
+const SPEAKER_KEY = 'lanchat.speaker';
 
 let MAX_NAME = 24;
 let MAX_GROUP_NAME = 40;
@@ -17,6 +21,7 @@ const ICONS = {
   edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L20 8l-4-4L4 16v4Z"/></svg>',
   delete: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>',
   download: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M7 10l5 5 5-5M5 19h14"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4 6 6M14 3l7 7-4 1-2 5-2 2-7-7 2-2 5-2 1-4Z"/><path d="m10 14-6 6"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
 };
 
@@ -50,12 +55,49 @@ const els = {
   toggleSound: document.getElementById('toggle-sound'),
   toggleNotify: document.getElementById('toggle-notify'),
   newGroup: document.getElementById('new-group'),
+  newRoom: document.getElementById('new-room'),
   groupDialog: document.getElementById('group-dialog'),
   groupForm: document.getElementById('group-form'),
   groupName: document.getElementById('group-name'),
   groupMembers: document.getElementById('group-members'),
   groupError: document.getElementById('group-error'),
   groupCancel: document.getElementById('group-cancel'),
+  roomDialog: document.getElementById('room-dialog'),
+  roomForm: document.getElementById('room-form'),
+  roomName: document.getElementById('room-name'),
+  roomError: document.getElementById('room-error'),
+  roomCancel: document.getElementById('room-cancel'),
+  togglePins: document.getElementById('toggle-pins'),
+  pinCount: document.getElementById('pin-count'),
+  pinsDialog: document.getElementById('pins-dialog'),
+  pinsList: document.getElementById('pins-list'),
+  pinsSubtitle: document.getElementById('pins-subtitle'),
+  pinsClose: document.getElementById('pins-close'),
+  chatMenu: document.getElementById('chat-menu'),
+  chatMenuPanel: document.getElementById('chat-menu-panel'),
+  menuSearch: document.getElementById('menu-search'),
+  menuPins: document.getElementById('menu-pins'),
+  menuExportHtml: document.getElementById('menu-export-html'),
+  menuExportJson: document.getElementById('menu-export-json'),
+  menuCalls: document.getElementById('menu-calls'),
+  menuDevices: document.getElementById('menu-devices'),
+  searchDialog: document.getElementById('search-dialog'),
+  globalSearchInput: document.getElementById('global-search-input'),
+  globalSearchStatus: document.getElementById('global-search-status'),
+  globalSearchResults: document.getElementById('global-search-results'),
+  globalSearchClose: document.getElementById('global-search-close'),
+  callsDialog: document.getElementById('calls-dialog'),
+  callsList: document.getElementById('calls-list'),
+  callsClose: document.getElementById('calls-close'),
+  devicesDialog: document.getElementById('devices-dialog'),
+  micSelect: document.getElementById('mic-select'),
+  camSelect: document.getElementById('cam-select'),
+  speakerSelect: document.getElementById('speaker-select'),
+  deviceNote: document.getElementById('device-note'),
+  devicesClose: document.getElementById('devices-close'),
+  mentionMenu: document.getElementById('mention-menu'),
+  uploadPanel: document.getElementById('upload-panel'),
+  liveRegion: document.getElementById('live-region'),
   scrim: document.getElementById('scrim'),
   app: document.getElementById('app'),
   searchbar: document.getElementById('searchbar'),
@@ -82,6 +124,8 @@ const els = {
   callStatus: document.getElementById('call-status'),
   callTimer: document.getElementById('call-timer'),
   callMute: document.getElementById('call-mute'),
+  callShare: document.getElementById('call-share'),
+  callDevices: document.getElementById('call-devices'),
   callAccept: document.getElementById('call-accept'),
   callDecline: document.getElementById('call-decline'),
   callHangup: document.getElementById('call-hangup'),
@@ -104,24 +148,45 @@ function loadSeen() {
   }
 }
 
+function loadDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
 const me = { id: getDeviceId(), name: localStorage.getItem(NAME_KEY) || '' };
 const settings = {
   theme: localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark',
   sound: localStorage.getItem(SOUND_KEY) !== '0',
   notify: localStorage.getItem(NOTIFY_KEY) === '1',
+  mic: localStorage.getItem(MIC_KEY) || '',
+  cam: localStorage.getItem(CAM_KEY) || '',
+  speaker: localStorage.getItem(SPEAKER_KEY) || '',
 };
 
 let source = null;
 let users = [];
 let conversations = [];
 let seen = loadSeen();
+let drafts = loadDrafts();
 let activeId = localStorage.getItem(CHANNEL_KEY) || 'general';
 let typingByChannel = new Map();
 let replyTo = null;
 let editingId = null;
 let searchQuery = '';
 let uploadInProgress = false;
+let uploads = [];
 let jumpCount = 0;
+let callLog = [];
+let selectedMessageId = null;
+let lastDialogTrigger = null;
+let pendingDeepLink = null;
+let globalSearchTimer = null;
+let globalSearchRequest = 0;
+let mentionQuery = null;
+let mentionIndex = 0;
 const sentReads = new Set();
 
 function make(tag, className, text) {
@@ -181,22 +246,71 @@ function fileExtension(name) {
   return match ? match[1].toUpperCase() : 'FILE';
 }
 
-function linkify(text) {
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function mentionCandidates(conversation) {
+  let list = [];
+  if (conversation?.type === 'group' && Array.isArray(conversation.members) && conversation.members.length) {
+    list = conversation.members;
+  } else if (conversation?.type === 'dm' && conversation.peerId) {
+    list = [...users, { id: conversation.peerId, name: conversation.name }];
+  } else {
+    list = users;
+  }
+  const seenIds = new Set();
+  return list.filter((user) => {
+    if (!user || !user.id || !user.name || seenIds.has(user.id)) return false;
+    seenIds.add(user.id);
+    return true;
+  });
+}
+
+function linkify(text, conversation) {
   const fragment = document.createDocumentFragment();
-  const pattern = /(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+  const names = mentionCandidates(conversation)
+    .map((user) => user.name)
+    .sort((a, b) => b.length - a.length);
+  const urlSource = 'https?:\\/\\/[^\\s<>()]+[^\\s<>().,;:!?\'"]';
+  const mentionSource = names.length ? `@(?:${names.map(escapeRegExp).join('|')})(?![\\p{L}\\p{N}_])` : '';
+  const pattern = new RegExp(`(${[urlSource, mentionSource].filter(Boolean).join('|')})`, 'gu');
   let lastIndex = 0;
   let match;
   while ((match = pattern.exec(text))) {
     if (match.index > lastIndex) fragment.append(text.slice(lastIndex, match.index));
-    const link = make('a', 'msg-link', match[0]);
-    link.href = match[0];
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    fragment.append(link);
-    lastIndex = match.index + match[0].length;
+    const value = match[0];
+    if (value.startsWith('@')) {
+      const mention = make('span', 'mention', value);
+      mention.title = value.slice(1);
+      fragment.append(mention);
+    } else {
+      const link = make('a', 'msg-link', value);
+      link.href = value;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      fragment.append(link);
+    }
+    lastIndex = match.index + value.length;
   }
   if (lastIndex < text.length) fragment.append(text.slice(lastIndex));
   return fragment;
+}
+
+function announce(text) {
+  if (!text) return;
+  els.liveRegion.textContent = '';
+  setTimeout(() => {
+    els.liveRegion.textContent = text;
+  }, 40);
+}
+
+function motionReduced() {
+  return window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+
+function scrollBehavior() {
+  return motionReduced() ? 'auto' : 'smooth';
 }
 
 function toast(text, kind) {
@@ -212,6 +326,55 @@ function toast(text, kind) {
 function setStatus(text, state) {
   els.status.textContent = text;
   els.status.className = `status ${state || ''}`.trim();
+}
+
+const dialogReturnFocus = new WeakMap();
+
+function focusableElements(container) {
+  return [...container.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )].filter((element) => !element.hidden && element.offsetParent !== null);
+}
+
+function openDialog(dialog, focusTarget) {
+  if (!dialog) return;
+  closeChatMenu();
+  dialogReturnFocus.set(dialog, document.activeElement);
+  dialog.hidden = false;
+  requestAnimationFrame(() => {
+    const target = focusTarget || focusableElements(dialog)[0];
+    target?.focus();
+  });
+}
+
+function closeDialog(dialog) {
+  if (!dialog || dialog.hidden) return;
+  dialog.hidden = true;
+  const trigger = dialogReturnFocus.get(dialog);
+  dialogReturnFocus.delete(dialog);
+  if (trigger && document.contains(trigger) && typeof trigger.focus === 'function') trigger.focus();
+}
+
+function topOpenDialog() {
+  const dialogs = [...document.querySelectorAll('.overlay')].filter((dialog) => !dialog.hidden);
+  return dialogs[dialogs.length - 1] || null;
+}
+
+function trapDialogFocus(event) {
+  if (event.key !== 'Tab') return;
+  const dialog = topOpenDialog();
+  if (!dialog) return;
+  const focusable = focusableElements(dialog);
+  if (focusable.length === 0) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 function dmChannelId(userA, userB) {
@@ -259,6 +422,27 @@ function saveSeen() {
   }
 }
 
+function saveDrafts() {
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(drafts));
+  } catch {
+    // Storage may be full or unavailable.
+  }
+}
+
+function saveDraft(channelId) {
+  if (!channelId) return;
+  const value = els.input.value;
+  if (value.trim()) drafts[channelId] = value;
+  else delete drafts[channelId];
+  saveDrafts();
+}
+
+function loadDraft(channelId) {
+  els.input.value = drafts[channelId] || '';
+  autoResize();
+}
+
 function markSeen(conversation) {
   if (!conversation) return;
   const history = conversation.history || [];
@@ -298,7 +482,8 @@ function baseSubtitle(conversation) {
     return `${conversation.members?.length || 0} member${conversation.members?.length === 1 ? '' : 's'}`;
   }
   const online = users.length;
-  return `${online} online · ${conversation.history?.length || 0} message${conversation.history?.length === 1 ? '' : 's'}`;
+  const scope = conversation.type === 'room' ? 'public room' : 'room';
+  return `${online} online · ${conversation.history?.length || 0} message${conversation.history?.length === 1 ? '' : 's'} · ${scope}`;
 }
 
 function updateHeader(conversation) {
@@ -310,6 +495,7 @@ function updateHeader(conversation) {
     els.subtitle.textContent = 'No messages yet';
     els.input.placeholder = 'Message the room…';
     updateCallButtons(null);
+    updatePinCount();
     return;
   }
 
@@ -329,11 +515,14 @@ function updateHeader(conversation) {
     els.input.placeholder = 'Message the room…';
   } else if (conversation.type === 'dm') {
     els.input.placeholder = `Message ${conversation.name} privately…`;
+  } else if (conversation.type === 'room') {
+    els.input.placeholder = `Message #${conversation.name}…`;
   } else {
     els.input.placeholder = `Message ${conversation.name}…`;
   }
 
   els.subtitle.textContent = baseSubtitle(conversation);
+  updatePinCount();
 }
 
 /* ---------- Message rendering ---------- */
@@ -360,6 +549,9 @@ function emptyState(conversation) {
   } else if (conversation.type === 'dm') {
     title.textContent = `Chat with ${conversation.name}`;
     empty.append(logo, title, 'This is a private conversation. Only the two of you can see these messages.');
+  } else if (conversation.type === 'room') {
+    title.textContent = `# ${conversation.name}`;
+    empty.append(logo, title, 'This is a public room. Everyone connected to this network can join the conversation.');
   } else {
     title.textContent = conversation.name;
     empty.append(logo, title, `This is the start of the group chat with ${conversation.members?.length || 0} members.`);
@@ -484,6 +676,8 @@ function buildMessageRow(message, conversation, previous) {
 
   const row = make('div', `msg${mine ? ' mine' : ''}${grouped ? ' grouped' : ''}`);
   row.dataset.mid = message.id;
+  row.tabIndex = -1;
+  if (Array.isArray(message.mentions) && message.mentions.includes(me.id)) row.classList.add('mentioned');
 
   if (grouped) {
     row.append(make('div', 'avatar avatar-spacer'));
@@ -503,13 +697,16 @@ function buildMessageRow(message, conversation, previous) {
     body.append(head);
   }
 
+  if (message.pinnedAt) {
+    body.append(make('div', 'pinned-label', 'Pinned message'));
+  }
   if (message.replyTo) body.append(buildReplyQuote(message));
 
   if (message.kind === 'file' && message.file) {
     body.append(buildFileBubble(message));
   } else {
     const text = make('div', 'msg-text');
-    text.append(linkify(message.text || ''));
+    text.append(linkify(message.text || '', conversation));
     body.append(text);
   }
 
@@ -526,6 +723,11 @@ function buildMessageRow(message, conversation, previous) {
   const actions = make('div', 'msg-actions');
   const reactButton = actionButton(ICONS.react, 'Add reaction', () => openReactionPicker(row, message, conversation));
   const replyButton = actionButton(ICONS.reply, 'Reply', () => startReply(message));
+  const pinButton = actionButton(
+    ICONS.pin,
+    message.pinnedAt ? 'Unpin message' : 'Pin message',
+    () => togglePin(message, conversation),
+  );
   const copyButton = actionButton(ICONS.copy, 'Copy text', () => {
     if (!message.text) return;
     if (!navigator.clipboard) {
@@ -537,7 +739,7 @@ function buildMessageRow(message, conversation, previous) {
       () => toast('Could not copy', 'error'),
     );
   });
-  actions.append(reactButton, replyButton, copyButton);
+  actions.append(reactButton, replyButton, pinButton, copyButton);
 
   if (mine) {
     if (message.kind !== 'file') {
@@ -552,7 +754,92 @@ function buildMessageRow(message, conversation, previous) {
 
   body.append(actions);
   row.append(body);
+  wireMessageGestures(row, message);
   return row;
+}
+
+function revealMessageActions(row) {
+  document.querySelectorAll('.msg.actions-open').forEach((entry) => {
+    if (entry !== row) entry.classList.remove('actions-open');
+  });
+  row.classList.add('actions-open');
+}
+
+function wireMessageGestures(row, message) {
+  let startX = 0;
+  let startY = 0;
+  let tracking = false;
+  let moved = false;
+  let longPress = null;
+
+  const reset = () => {
+    tracking = false;
+    moved = false;
+    clearTimeout(longPress);
+    longPress = null;
+    row.classList.remove('swiping');
+    row.style.transform = '';
+  };
+
+  row.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse') return;
+    if (event.target.closest('button, a, img, input, textarea, .reaction-picker')) return;
+    startX = event.clientX;
+    startY = event.clientY;
+    tracking = true;
+    moved = false;
+    longPress = setTimeout(() => {
+      if (tracking && !moved) {
+        revealMessageActions(row);
+        try {
+          navigator.vibrate?.(20);
+        } catch {
+          // Vibration is optional.
+        }
+      }
+    }, 430);
+  });
+
+  row.addEventListener('pointermove', (event) => {
+    if (!tracking) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    if (Math.abs(dy) > 28 && Math.abs(dy) > Math.abs(dx)) {
+      reset();
+      return;
+    }
+    if (dx > 8 && Math.abs(dy) < 36) {
+      moved = true;
+      clearTimeout(longPress);
+      row.classList.add('swiping');
+      row.style.transform = `translateX(${Math.min(dx * 0.55, 78)}px)`;
+    }
+  });
+
+  row.addEventListener('pointerup', (event) => {
+    if (!tracking) return;
+    const dx = event.clientX - startX;
+    const dy = event.clientY - startY;
+    const shouldReply = dx > 56 && Math.abs(dy) < 40;
+    reset();
+    if (shouldReply) {
+      startReply(message);
+      try {
+        navigator.vibrate?.(15);
+      } catch {
+        // Vibration is optional.
+      }
+    }
+  });
+
+  row.addEventListener('pointercancel', reset);
+
+  row.addEventListener('click', (event) => {
+    if (!window.matchMedia('(hover: none)').matches) return;
+    if (event.target.closest('button, a, img, input, textarea, .reaction-picker, .reply-quote, .file-download')) return;
+    if (row.classList.contains('actions-open')) row.classList.remove('actions-open');
+    else revealMessageActions(row);
+  });
 }
 
 function typingNames(conversation) {
@@ -634,6 +921,7 @@ function renderMessages({ scroll = true } = {}) {
   els.messages.replaceChildren(fragment);
   els.searchCount.textContent = query ? `${visible.length} found` : '';
   updateTyping(conversation);
+  updatePinCount();
 
   if (scroll || wasNearBottom) scrollToBottom();
   else els.messages.scrollTop = previousScroll;
@@ -645,9 +933,30 @@ function renderMessages({ scroll = true } = {}) {
 function jumpTo(messageId) {
   const target = els.messages.querySelector(`[data-mid="${CSS.escape(messageId)}"]`);
   if (!target) return;
-  target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  target.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
   target.classList.add('highlight');
   setTimeout(() => target.classList.remove('highlight'), 1300);
+}
+
+function selectMessageRow(row) {
+  if (!row) return;
+  els.messages.querySelectorAll('.msg.selected').forEach((entry) => entry.classList.remove('selected'));
+  row.classList.add('selected');
+  selectedMessageId = row.dataset.mid || null;
+  row.focus({ preventScroll: false });
+}
+
+function moveMessageSelection(direction) {
+  const rows = [...els.messages.querySelectorAll('.msg')];
+  if (rows.length === 0) return;
+  let index = rows.findIndex((row) => row === document.activeElement || row.dataset.mid === selectedMessageId);
+  if (index < 0) index = direction > 0 ? -1 : rows.length;
+  index = Math.max(0, Math.min(rows.length - 1, index + direction));
+  selectMessageRow(rows[index]);
+}
+
+function messageById(messageId) {
+  return (activeConversation()?.history || []).find((message) => message.id === messageId) || null;
 }
 
 /* ---------- Channels / users ---------- */
@@ -692,14 +1001,17 @@ function renderChannels() {
     top.append(label, time);
 
     const bottom = make('div', 'channel-bottom');
-    const preview = make('span', 'channel-preview', messagePreview(last));
-    if (last && last.kind === 'file') preview.classList.add('muted');
+    const draft = drafts[conversation.id];
+    const preview = make('span', 'channel-preview', draft ? `Draft: ${draft}` : messagePreview(last));
+    if ((last && last.kind === 'file') || draft) preview.classList.add('muted');
     bottom.append(preview);
 
     const unread = unreadCount(conversation);
     if (unread > 0) {
       const badge = make('span', 'unread', unread > 99 ? '99+' : String(unread));
       bottom.append(badge);
+    } else if (draft) {
+      bottom.append(make('span', 'tag draft-tag', 'Draft'));
     } else if (conversation.type === 'group') {
       bottom.append(make('span', 'tag', String(conversation.members?.length || 0)));
     }
@@ -757,15 +1069,14 @@ function setActive(id) {
   const conversation = getConversation(id);
   if (!conversation) return;
   const wasEditing = Boolean(editingId);
+  if (!wasEditing) saveDraft(activeId);
   markSeen(activeConversation());
   activeId = id;
   localStorage.setItem(CHANNEL_KEY, activeId);
   markSeen(conversation);
   clearComposerState();
-  if (wasEditing) {
-    els.input.value = '';
-    autoResize();
-  }
+  loadDraft(activeId);
+  if (wasEditing) closeMentionMenu();
   closeSearch();
   renderChannels();
   updateHeader(conversation);
@@ -836,6 +1147,70 @@ async function toggleReaction(message, conversation, emoji) {
   } catch (error) {
     toast(`Reaction failed: ${error.message}`, 'error');
   }
+}
+
+async function togglePin(message, conversation) {
+  try {
+    const data = await postJson('/api/messages/pin', {
+      userId: me.id,
+      channel: conversation.id,
+      messageId: message.id,
+      action: message.pinnedAt ? 'remove' : 'add',
+    });
+    if (data.message) upsertMessage(data.message);
+    toast(message.pinnedAt ? 'Message unpinned' : 'Message pinned');
+  } catch (error) {
+    toast(`Could not update pin: ${error.message}`, 'error');
+  }
+}
+
+function pinnedMessages(conversation = activeConversation()) {
+  return (conversation?.history || []).filter((message) => message.pinnedAt);
+}
+
+function updatePinCount() {
+  const count = pinnedMessages().length;
+  els.pinCount.textContent = count > 9 ? '9+' : String(count);
+  els.pinCount.hidden = count === 0;
+  els.togglePins.setAttribute('aria-label', count ? `${count} pinned messages` : 'Pinned messages');
+}
+
+function openPins() {
+  const conversation = activeConversation();
+  const pinned = pinnedMessages(conversation);
+  els.pinsSubtitle.textContent = conversation
+    ? `Pinned messages in ${conversation.name}.`
+    : 'Pinned messages from this conversation.';
+  els.pinsList.replaceChildren();
+
+  if (pinned.length === 0) {
+    els.pinsList.append(make('li', 'info-empty', 'No pinned messages yet. Use the pin action on any message.'));
+  }
+
+  for (const message of pinned) {
+    const li = make('li', 'info-item pin-item');
+    const main = make('button', 'info-main');
+    main.type = 'button';
+    main.append(
+      make('strong', null, message.name),
+      make('span', null, (message.kind === 'file' ? message.file?.name : message.text || '').slice(0, 160)),
+      make('time', null, formatTime(message.time)),
+    );
+    main.addEventListener('click', () => {
+      closeDialog(els.pinsDialog);
+      jumpTo(message.id);
+    });
+    const unpin = make('button', 'info-action', 'Unpin');
+    unpin.type = 'button';
+    unpin.addEventListener('click', () => {
+      togglePin(message, conversation);
+      closeDialog(els.pinsDialog);
+    });
+    li.append(main, unpin);
+    els.pinsList.append(li);
+  }
+
+  openDialog(els.pinsDialog, els.pinsClose);
 }
 
 function startReply(message) {
@@ -985,18 +1360,74 @@ function beep(frequency, duration, volume) {
   }
 }
 
+function deepLinkFor(conversation, message) {
+  const params = new URLSearchParams({ channel: conversation.id });
+  if (message?.id) params.set('message', message.id);
+  return `${location.origin}/#${params}`;
+}
+
+function parseDeepLink() {
+  const params = new URLSearchParams(location.hash.replace(/^#/, ''));
+  const channel = params.get('channel');
+  if (!channel) return null;
+  return { channel, message: params.get('message') || '' };
+}
+
+function applyDeepLink(link = parseDeepLink()) {
+  if (!link) return false;
+  if (!getConversation(link.channel)) {
+    pendingDeepLink = link;
+    return false;
+  }
+  pendingDeepLink = null;
+  setActive(link.channel);
+  if (link.message) requestAnimationFrame(() => jumpTo(link.message));
+  try {
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+  } catch {
+    // URL cleanup is optional.
+  }
+  return true;
+}
+
+function openNotificationTarget(conversation, message) {
+  window.focus();
+  setActive(conversation.id);
+  if (message?.id) jumpTo(message.id);
+}
+
 function showNotification(conversation, message) {
   if (!settings.notify || !('Notification' in window) || Notification.permission !== 'granted') return;
   const body = message.kind === 'file' ? `Sent a file: ${message.file?.name || ''}` : message.text || '';
+  const title = `${message.name} · ${conversation.name}`;
+  const options = {
+    body: body.slice(0, 160),
+    icon: '/logo.svg',
+    tag: conversation.id,
+    data: { url: deepLinkFor(conversation, message) },
+  };
+
+  if (navigator.serviceWorker?.controller) {
+    navigator.serviceWorker.ready
+      .then((registration) => registration.showNotification(title, options))
+      .catch(() => {
+        try {
+          const notification = new Notification(title, options);
+          notification.onclick = () => {
+            openNotificationTarget(conversation, message);
+            notification.close();
+          };
+        } catch {
+          // Notifications are optional.
+        }
+      });
+    return;
+  }
+
   try {
-    const notification = new Notification(`${message.name} · ${conversation.name}`, {
-      body: body.slice(0, 160),
-      icon: '/logo.svg',
-      tag: conversation.id,
-    });
+    const notification = new Notification(title, options);
     notification.onclick = () => {
-      window.focus();
-      setActive(conversation.id);
+      openNotificationTarget(conversation, message);
       notification.close();
     };
   } catch {
@@ -1035,11 +1466,14 @@ function conversationFromMessage(message) {
     };
   }
 
+  const isGroup = message.channel?.startsWith('group:');
+  const isRoom = message.channel?.startsWith('room:');
   return {
     id: message.channel || 'general',
-    type: message.channel?.startsWith('group:') ? 'group' : 'general',
-    name: message.channel?.startsWith('group:') ? 'Group' : 'General',
-    groupId: message.channel?.startsWith('group:') ? message.channel.slice(6) : undefined,
+    type: isGroup ? 'group' : isRoom ? 'room' : 'general',
+    name: isGroup ? 'Group' : isRoom ? 'Room' : 'General',
+    groupId: isGroup ? message.channel.slice(6) : undefined,
+    roomId: isRoom ? message.channel.slice(5) : undefined,
     members: [],
     history: [],
     unread: 0,
@@ -1073,9 +1507,15 @@ function handleIncomingMessage(message) {
 
   if (isNew && message.userId !== me.id) {
     const away = document.hidden || conversation.id !== activeId;
-    if (away) {
-      beep(860, 0.16, 0.06);
+    const mentioned = Array.isArray(message.mentions) && message.mentions.includes(me.id);
+    const preview = message.kind === 'file' ? message.file?.name || 'Attachment' : message.text || '';
+    announce(`${message.name} in ${conversation.name}: ${preview}`);
+    if (away || mentioned) {
+      beep(mentioned ? 980 : 860, 0.16, 0.06);
       showNotification(conversation, message);
+    }
+    if (mentioned && conversation.id !== activeId) {
+      toast(`${message.name} mentioned you in ${conversation.name}`);
     }
     if (conversation.id === activeId && !isNearBottom()) {
       jumpCount += 1;
@@ -1113,10 +1553,12 @@ function applyConversations(incoming) {
 
   conversations = merged;
 
+  const previousActive = activeId;
   if (!getConversation(activeId) && conversations.length) {
     activeId = conversations[0].id;
     localStorage.setItem(CHANNEL_KEY, activeId);
   }
+  if (previousActive !== activeId) loadDraft(activeId);
 
   renderChannels();
   updateHeader(activeConversation());
@@ -1126,11 +1568,41 @@ function applyConversations(incoming) {
 /* ---------- Calls (WebRTC) ---------- */
 
 const RTC_CONFIG = { iceServers: [] };
+const RING_TIMEOUT = 35_000;
 
 let call = null;
 let callTimerId = null;
 let ringInterval = null;
 let ringCtx = null;
+
+function mediaConstraints(withVideo) {
+  const audio = settings.mic ? { deviceId: { ideal: settings.mic } } : true;
+  let video = false;
+  if (withVideo) {
+    video = { facingMode: 'user' };
+    if (settings.cam) video.deviceId = { ideal: settings.cam };
+  }
+  return { audio, video };
+}
+
+function clearRingTimeout(current = call) {
+  if (current?.ringTimeout) {
+    clearTimeout(current.ringTimeout);
+    current.ringTimeout = null;
+  }
+}
+
+function armRingTimeout() {
+  if (!call || call.state === 'active') return;
+  clearRingTimeout(call);
+  const callId = call.callId;
+  const role = call.role;
+  call.ringTimeout = setTimeout(() => {
+    if (!call || call.callId !== callId || call.state === 'active') return;
+    endCall(role === 'callee' ? 'Missed call' : 'No answer', role === 'callee' ? 'decline' : 'hangup');
+    toast(role === 'callee' ? 'Missed call' : 'No answer');
+  }, RING_TIMEOUT);
+}
 
 function newCallId() {
   return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -1203,6 +1675,7 @@ function stopCallTimer() {
 
 function startCallTimer() {
   if (!call) return;
+  clearRingTimeout();
   if (!call.startedAt) call.startedAt = Date.now();
   stopCallTimer();
   updateCallTimer();
@@ -1229,8 +1702,11 @@ function renderCallUi() {
   els.callAccept.hidden = !incoming;
   els.callDecline.hidden = !incoming;
   els.callMute.hidden = !active;
+  els.callShare.hidden = !active || !call.withVideo;
+  els.callDevices.hidden = !active && !incoming;
   els.callHangup.hidden = incoming;
   els.callMute.textContent = call.muted ? 'Unmute' : 'Mute';
+  els.callShare.textContent = call.screenStream ? 'Stop sharing' : 'Share screen';
   els.callRemoteVideo.hidden = !showVideo;
   els.callLocalVideo.hidden = !showVideo;
   els.callAvatar.hidden = showVideo;
@@ -1261,6 +1737,7 @@ function attachRemoteStream() {
     els.callRemoteAudio.srcObject = stream;
     els.callRemoteAudio.play().catch(() => {});
   }
+  applySpeaker();
 }
 
 function createPeerConnection() {
@@ -1282,14 +1759,43 @@ function createPeerConnection() {
     if (!call || call.pc !== pc) return;
     if (pc.connectionState === 'connected') {
       stopRing();
+      clearRingTimeout();
+      call.iceAttempts = 0;
+      if (call.iceTimer) {
+        clearTimeout(call.iceTimer);
+        call.iceTimer = null;
+      }
       if (call.state === 'active' && !call.startedAt) startCallTimer();
       renderCallUi();
-    } else if (pc.connectionState === 'failed') {
-      endCall('Call connection failed', 'hangup');
+    } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+      scheduleIceRestart();
     }
   };
 
   return pc;
+}
+
+function scheduleIceRestart() {
+  const current = call;
+  if (!current || current.role !== 'caller' || !current.pc || current.iceTimer) return;
+  if (current.pc.connectionState === 'connected') return;
+  current.iceTimer = setTimeout(async () => {
+    if (!call || call !== current || !current.pc) return;
+    current.iceTimer = null;
+    if (current.pc.connectionState === 'connected') return;
+    if (current.pc.signalingState !== 'stable') return;
+    try {
+      current.pc.restartIce();
+      const offer = await current.pc.createOffer({ iceRestart: true });
+      await current.pc.setLocalDescription(offer);
+      await sendSignal('offer', current.pc.localDescription);
+      current.iceAttempts = (current.iceAttempts || 0) + 1;
+      if (current.iceAttempts < 2) scheduleIceRestart();
+      else if (current.pc.connectionState !== 'connected') endCall('Call connection failed', 'hangup');
+    } catch {
+      endCall('Call connection failed', 'hangup');
+    }
+  }, 2600);
 }
 
 async function sendSignal(type, data) {
@@ -1334,11 +1840,16 @@ function sendSignalBeacon(target, type) {
 
 function cleanupCall(current) {
   if (!current) return;
+  clearRingTimeout(current);
+  if (current.iceTimer) clearTimeout(current.iceTimer);
+  current.ringTimeout = null;
+  current.iceTimer = null;
   try {
     current.pc?.close();
   } catch {
     // Already closed.
   }
+  current.screenStream?.getTracks().forEach((track) => track.stop());
   current.localStream?.getTracks().forEach((track) => track.stop());
   els.callRemoteAudio.srcObject = null;
   els.callRemoteVideo.srcObject = null;
@@ -1389,15 +1900,18 @@ async function startCall(withVideo) {
     pc: null,
     localStream: null,
     remoteStream: null,
+    videoSender: null,
+    screenStream: null,
+    ringTimeout: null,
+    iceTimer: null,
+    iceAttempts: 0,
   };
   renderCallUi();
   startRing();
+  armRingTimeout();
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: withVideo ? { facingMode: 'user' } : false,
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints(withVideo));
     if (!call) {
       stream.getTracks().forEach((track) => track.stop());
       return;
@@ -1410,6 +1924,7 @@ async function startCall(withVideo) {
 
     const pc = createPeerConnection();
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    call.videoSender = pc.getSenders().find((sender) => sender.track?.kind === 'video') || null;
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -1441,10 +1956,7 @@ async function acceptCall() {
   stopRing();
 
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: true,
-      video: call.withVideo ? { facingMode: 'user' } : false,
-    });
+    const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints(call.withVideo));
     if (!call) {
       stream.getTracks().forEach((track) => track.stop());
       return;
@@ -1457,6 +1969,7 @@ async function acceptCall() {
 
     const pc = createPeerConnection();
     for (const track of stream.getTracks()) pc.addTrack(track, stream);
+    call.videoSender = pc.getSenders().find((sender) => sender.track?.kind === 'video') || null;
 
     await pc.setRemoteDescription(call.offer);
     await flushPendingIce();
@@ -1486,12 +1999,74 @@ function toggleMute() {
   renderCallUi();
 }
 
+async function stopScreenShare() {
+  const current = call;
+  if (!current?.screenStream) return;
+  const screen = current.screenStream;
+  current.screenStream = null;
+  const camera = current.localStream?.getVideoTracks()[0] || null;
+  try {
+    await current.videoSender?.replaceTrack(camera);
+  } catch {
+    // The sender may already be closed.
+  }
+  screen.getTracks().forEach((track) => track.stop());
+  if (call === current) {
+    els.callLocalVideo.srcObject = current.localStream;
+    els.callLocalVideo.play().catch(() => {});
+    renderCallUi();
+  }
+}
+
+async function toggleScreenShare() {
+  if (!call || call.state !== 'active' || !call.withVideo) return;
+  if (call.screenStream) {
+    await stopScreenShare();
+    return;
+  }
+  if (!navigator.mediaDevices?.getDisplayMedia) {
+    toast('Screen sharing is not available in this browser', 'error');
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    if (!call || call.state !== 'active') {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    const track = stream.getVideoTracks()[0];
+    await call.videoSender?.replaceTrack(track);
+    call.screenStream = stream;
+    track.addEventListener('ended', () => {
+      if (call?.screenStream === stream) stopScreenShare();
+    });
+    els.callLocalVideo.srcObject = stream;
+    els.callLocalVideo.play().catch(() => {});
+    renderCallUi();
+  } catch (error) {
+    if (error?.name !== 'NotAllowedError') toast(`Could not share screen: ${error.message}`, 'error');
+  }
+}
+
 async function handleSignal(signal) {
   if (!signal || !signal.fromId || signal.fromId === me.id) return;
 
   if (signal.type === 'offer') {
     if (call) {
-      if (call.callId === signal.callId) return;
+      if (call.callId === signal.callId) {
+        if (call.pc && call.state === 'active' && signal.data) {
+          try {
+            await call.pc.setRemoteDescription(signal.data);
+            await flushPendingIce();
+            const answer = await call.pc.createAnswer();
+            await call.pc.setLocalDescription(answer);
+            await sendSignal('answer', call.pc.localDescription);
+          } catch (error) {
+            endCall(`Call connection failed: ${error.message}`, 'hangup');
+          }
+        }
+        return;
+      }
       sendSignalBeacon({ peerId: signal.fromId, callId: signal.callId }, 'busy');
       return;
     }
@@ -1513,9 +2088,15 @@ async function handleSignal(signal) {
       pc: null,
       localStream: null,
       remoteStream: null,
+      videoSender: null,
+      screenStream: null,
+      ringTimeout: null,
+      iceTimer: null,
+      iceAttempts: 0,
     };
     renderCallUi();
     startRing();
+    armRingTimeout();
     return;
   }
 
@@ -1573,8 +2154,10 @@ function connect() {
       if (data.config.maxText) MAX_TEXT = data.config.maxText;
     }
     users = data.users || [];
+    callLog = data.calls || [];
     renderUsers();
     applyConversations(data.conversations);
+    applyDeepLink(pendingDeepLink || parseDeepLink());
   });
 
   source.addEventListener('conversations', (event) => {
@@ -1634,6 +2217,15 @@ function connect() {
     }
   });
 
+  source.addEventListener('calls', (event) => {
+    try {
+      callLog = JSON.parse(event.data).calls || [];
+      if (!els.callsDialog.hidden) renderCallHistory();
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
+
   source.addEventListener('signal', (event) => {
     let signal;
     try {
@@ -1656,6 +2248,71 @@ function autoResize() {
   els.input.style.height = `${Math.min(els.input.scrollHeight, 180)}px`;
 }
 
+function closeMentionMenu() {
+  mentionQuery = null;
+  mentionIndex = 0;
+  els.mentionMenu.hidden = true;
+  els.mentionMenu.replaceChildren();
+}
+
+function updateMentionMenu() {
+  const conversation = activeConversation();
+  if (!conversation) return closeMentionMenu();
+  const caret = els.input.selectionStart || 0;
+  const before = els.input.value.slice(0, caret);
+  const match = /(?:^|\s)@([\p{L}\p{N}_.-]*)$/u.exec(before);
+  if (!match) return closeMentionMenu();
+
+  const query = match[1].toLowerCase();
+  const options = mentionCandidates(conversation)
+    .filter((user) => user.id !== me.id && user.name.toLowerCase().includes(query))
+    .slice(0, 6);
+  if (options.length === 0) return closeMentionMenu();
+
+  mentionQuery = { start: match.index + match[0].lastIndexOf('@'), options, query };
+  mentionIndex = Math.min(mentionIndex, options.length - 1);
+  els.mentionMenu.replaceChildren();
+
+  options.forEach((user, index) => {
+    const button = make('button', `mention-option${index === mentionIndex ? ' active' : ''}`);
+    button.type = 'button';
+    button.setAttribute('role', 'option');
+    button.setAttribute('aria-selected', String(index === mentionIndex));
+    const avatar = make('span', 'avatar', initials(user.name));
+    avatar.style.background = avatarColor(user.name);
+    button.append(avatar, make('span', null, user.name));
+    button.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      chooseMention(user);
+    });
+    els.mentionMenu.append(button);
+  });
+
+  els.mentionMenu.hidden = false;
+}
+
+function chooseMention(user) {
+  if (!mentionQuery) return;
+  const caret = els.input.selectionStart || 0;
+  const before = els.input.value.slice(0, mentionQuery.start);
+  const after = els.input.value.slice(caret);
+  const inserted = `@${user.name} `;
+  els.input.value = `${before}${inserted}${after}`;
+  const nextCaret = before.length + inserted.length;
+  els.input.setSelectionRange(nextCaret, nextCaret);
+  closeMentionMenu();
+  autoResize();
+  noteTyping();
+  saveDraft(activeId);
+  els.input.focus();
+}
+
+function mentionsInText(text, conversation) {
+  return mentionCandidates(conversation)
+    .filter((user) => user.id !== me.id && text.includes(`@${user.name}`))
+    .map((user) => user.id);
+}
+
 async function sendMessage() {
   if (uploadInProgress) return;
   const text = els.input.value.trim();
@@ -1666,9 +2323,12 @@ async function sendMessage() {
   els.input.value = '';
   autoResize();
   stopTyping();
+  closeMentionMenu();
 
+  const targetId = conversation.id;
   const pendingReply = replyTo;
   const editing = editingId;
+  const mentions = mentionsInText(text, conversation);
 
   try {
     if (editing) {
@@ -1678,8 +2338,12 @@ async function sendMessage() {
         channel: conversation.id,
         messageId: editing,
         text,
+        mentions,
       });
-      clearComposerState();
+      if (activeId === targetId && editingId === editing) {
+        editingId = null;
+        updateComposerBanner();
+      }
     } else {
       await postJson('/api/messages', {
         id: me.id,
@@ -1687,27 +2351,87 @@ async function sendMessage() {
         text,
         channel: conversation.id,
         replyTo: pendingReply?.id || null,
+        mentions,
       });
-      replyTo = null;
-      updateComposerBanner();
+      if (activeId === targetId && pendingReply && replyTo?.id === pendingReply.id) {
+        replyTo = null;
+        updateComposerBanner();
+      }
+    }
+    if (!editing) {
+      delete drafts[conversation.id];
+      saveDrafts();
+      renderChannels();
     }
   } catch (error) {
-    if (!els.input.value) {
-      els.input.value = text;
-      autoResize();
+    if (activeId === targetId) {
+      if (!els.input.value) {
+        els.input.value = text;
+        autoResize();
+      }
+      if (editing && !editingId) editingId = editing;
+      if (pendingReply && !replyTo) replyTo = pendingReply;
+      updateComposerBanner();
     }
-    if (editing) editingId = editing;
-    if (pendingReply) replyTo = pendingReply;
-    updateComposerBanner();
     toast(error.message, 'error');
   } finally {
     els.send.disabled = false;
-    els.input.focus();
+    if (activeId === targetId) els.input.focus();
   }
 }
 
-function uploadFile(file, conversation) {
+function renderUploads() {
+  els.uploadPanel.replaceChildren();
+  if (uploads.length === 0) {
+    els.uploadPanel.hidden = true;
+    return;
+  }
+
+  els.uploadPanel.hidden = false;
+  for (const item of uploads) {
+    const row = make('div', `upload-item ${item.status}`);
+    const head = make('div', 'upload-head');
+    head.append(
+      make('span', 'upload-name', item.file.name),
+      make('span', 'upload-percent', item.status === 'done' ? 'Sent' : `${item.percent}%`),
+    );
+    const track = make('div', 'upload-track');
+    const bar = make('div', 'upload-bar');
+    bar.style.width = `${item.status === 'done' ? 100 : item.percent}%`;
+    track.append(bar);
+    const cancel = make('button', 'upload-cancel', item.status === 'done' ? 'Done' : 'Cancel');
+    cancel.type = 'button';
+    cancel.disabled = item.status === 'done' || item.status === 'cancelled';
+    cancel.addEventListener('click', () => cancelUpload(item));
+    row.append(head, track, cancel);
+    els.uploadPanel.append(row);
+  }
+}
+
+function removeUpload(item) {
+  uploads = uploads.filter((entry) => entry !== item);
+  renderUploads();
+}
+
+function cancelUpload(item) {
+  if (!item || item.status === 'done' || item.status === 'cancelled') return;
+  item.cancelled = true;
+  item.status = 'cancelled';
+  if (item.xhr) {
+    try {
+      item.xhr.abort();
+    } catch {
+      // The request may already be finished.
+    }
+  }
+  renderUploads();
+  toast(`Cancelled ${item.file.name}`);
+  setTimeout(() => removeUpload(item), 1200);
+}
+
+function uploadFile(item, conversation, pendingReply) {
   return new Promise((resolve, reject) => {
+    const { file } = item;
     const params = new URLSearchParams({
       id: me.id,
       name: me.name,
@@ -1715,25 +2439,36 @@ function uploadFile(file, conversation) {
       filename: file.name,
       type: file.type || 'application/octet-stream',
     });
-    if (replyTo?.id) params.set('reply', replyTo.id);
+    if (pendingReply?.id) params.set('reply', pendingReply.id);
 
     const xhr = new XMLHttpRequest();
+    item.xhr = xhr;
     xhr.open('POST', `/api/files?${params}`);
     xhr.responseType = 'json';
 
     xhr.upload.addEventListener('progress', (event) => {
-      if (!event.lengthComputable) return;
-      const percent = Math.round((event.loaded / event.total) * 100);
-      setStatus(`Uploading ${file.name} — ${percent}%`, '');
+      if (!event.lengthComputable || item.cancelled) return;
+      item.percent = Math.round((event.loaded / event.total) * 100);
+      item.status = 'uploading';
+      renderUploads();
     });
 
     xhr.addEventListener('load', () => {
+      item.xhr = null;
       const data = xhr.response || {};
       if (xhr.status >= 200 && xhr.status < 300 && data.ok) resolve(data);
       else reject(new Error(data.error || `Server responded ${xhr.status}`));
     });
-    xhr.addEventListener('error', () => reject(new Error('Upload failed')));
-    xhr.addEventListener('abort', () => reject(new Error('Upload cancelled')));
+    xhr.addEventListener('error', () => {
+      item.xhr = null;
+      reject(new Error('Upload failed'));
+    });
+    xhr.addEventListener('abort', () => {
+      item.xhr = null;
+      const error = new Error('Upload cancelled');
+      error.cancelled = true;
+      reject(error);
+    });
 
     xhr.send(file);
   });
@@ -1760,29 +2495,52 @@ async function sendFiles(fileList) {
 
   const conversation = activeConversation();
   if (!conversation) return;
+  const targetId = conversation.id;
+  const pendingReply = replyTo;
+
+  const items = files.map((file) => ({
+    file,
+    percent: 0,
+    status: 'queued',
+    cancelled: false,
+    xhr: null,
+  }));
+  uploads.push(...items);
+  renderUploads();
 
   uploadInProgress = true;
   els.attach.disabled = true;
   els.send.disabled = true;
   stopTyping();
+  let sentAny = false;
 
   try {
-    for (const file of files) {
+    for (const item of items) {
+      if (item.cancelled) continue;
       try {
-        await uploadFile(file, conversation);
-        setStatus(`Sent ${file.name}`, 'connected');
+        await uploadFile(item, conversation, pendingReply);
+        sentAny = true;
+        item.status = 'done';
+        item.percent = 100;
+        renderUploads();
+        setTimeout(() => removeUpload(item), 1600);
       } catch (error) {
+        if (error.cancelled || item.cancelled) continue;
+        item.status = 'failed';
+        renderUploads();
         toast(`Upload failed: ${error.message}`, 'error');
         break;
       }
     }
-    replyTo = null;
-    updateComposerBanner();
+    if (sentAny && activeId === targetId && pendingReply && replyTo?.id === pendingReply.id) {
+      replyTo = null;
+      updateComposerBanner();
+    }
   } finally {
     uploadInProgress = false;
     els.attach.disabled = false;
     els.send.disabled = false;
-    els.input.focus();
+    if (activeId === targetId) els.input.focus();
     restoreConnectionStatus();
   }
 }
@@ -1818,8 +2576,7 @@ function openGroupDialog() {
     els.groupMembers.append(li);
   }
 
-  els.groupDialog.hidden = false;
-  els.groupName.focus();
+  openDialog(els.groupDialog, els.groupName);
 }
 
 async function createGroup(event) {
@@ -1839,7 +2596,7 @@ async function createGroup(event) {
 
   try {
     const data = await postJson('/api/groups', { id: me.id, name: me.name, nameValue, members });
-    els.groupDialog.hidden = true;
+    closeDialog(els.groupDialog);
 
     if (!getConversation(data.group.channel)) {
       conversations.push({
@@ -1863,6 +2620,250 @@ async function createGroup(event) {
     toast(`Could not create group: ${error.message}`, 'error');
   } finally {
     submit.disabled = false;
+  }
+}
+
+/* ---------- Public rooms ---------- */
+
+function openRoomDialog() {
+  els.roomName.value = '';
+  els.roomError.hidden = true;
+  openDialog(els.roomDialog, els.roomName);
+}
+
+async function createRoom(event) {
+  event.preventDefault();
+  const roomName = els.roomName.value.trim().slice(0, MAX_GROUP_NAME);
+  if (!roomName) {
+    els.roomError.textContent = 'Give the room a name.';
+    els.roomError.hidden = false;
+    return;
+  }
+  els.roomError.hidden = true;
+  const submit = els.roomForm.querySelector('button[type="submit"]');
+  submit.disabled = true;
+
+  try {
+    const data = await postJson('/api/rooms', { id: me.id, name: roomName, displayName: me.name });
+    closeDialog(els.roomDialog);
+    if (!getConversation(data.room.channel)) {
+      conversations.push({
+        id: data.room.channel,
+        type: 'room',
+        name: data.room.name,
+        roomId: data.room.id,
+        history: [],
+        unread: 0,
+        lastTime: Date.now(),
+      });
+      renderChannels();
+    }
+    setActive(data.room.channel);
+    toast(`Created #${data.room.name}`);
+  } catch (error) {
+    els.roomError.textContent = error.message;
+    els.roomError.hidden = false;
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+/* ---------- Chat menu, search, export, calls, devices ---------- */
+
+function closeChatMenu() {
+  const hadFocus = els.chatMenuPanel.contains(document.activeElement);
+  els.chatMenuPanel.hidden = true;
+  els.chatMenu.setAttribute('aria-expanded', 'false');
+  if (hadFocus) els.chatMenu.focus();
+}
+
+function toggleChatMenu() {
+  const open = els.chatMenuPanel.hidden;
+  els.chatMenuPanel.hidden = !open;
+  els.chatMenu.setAttribute('aria-expanded', String(open));
+  if (open) {
+    const first = els.chatMenuPanel.querySelector('button');
+    first?.focus();
+  }
+}
+
+function exportConversation(format) {
+  const conversation = activeConversation();
+  if (!conversation) {
+    toast('Open a conversation first', 'error');
+    return;
+  }
+  closeChatMenu();
+  const params = new URLSearchParams({
+    id: me.id,
+    channel: conversation.id,
+    format,
+  });
+  const link = document.createElement('a');
+  link.href = `/api/export?${params}`;
+  link.download = '';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  toast(`Exporting ${conversation.name} as ${format.toUpperCase()}`);
+}
+
+function openGlobalSearch() {
+  closeChatMenu();
+  els.globalSearchInput.value = '';
+  els.globalSearchResults.replaceChildren();
+  els.globalSearchStatus.textContent = 'Type at least 2 characters.';
+  openDialog(els.searchDialog, els.globalSearchInput);
+}
+
+function searchResultLabel(result) {
+  if (result.kind === 'file') return `📎 ${result.text || 'Attachment'}`;
+  return result.text || '';
+}
+
+async function runGlobalSearch() {
+  const query = els.globalSearchInput.value.trim();
+  const request = ++globalSearchRequest;
+  if (query.length < 2) {
+    els.globalSearchResults.replaceChildren();
+    els.globalSearchStatus.textContent = 'Type at least 2 characters.';
+    return;
+  }
+
+  els.globalSearchStatus.textContent = 'Searching…';
+  try {
+    const params = new URLSearchParams({ id: me.id, q: query });
+    const data = await apiJson(`/api/search?${params}`);
+    if (request !== globalSearchRequest) return;
+    els.globalSearchResults.replaceChildren();
+    const results = data.results || [];
+    els.globalSearchStatus.textContent = results.length
+      ? `${results.length}${data.truncated ? '+' : ''} result${results.length === 1 ? '' : 's'}`
+      : 'No messages found.';
+
+    for (const result of results) {
+      const li = make('li', 'info-item');
+      const button = make('button', 'info-main search-result');
+      const title = make('span', 'result-title');
+      title.append(
+        make('strong', null, result.channelType === 'dm' ? result.channelName : `# ${result.channelName}`),
+        make('time', null, formatTime(result.time)),
+      );
+      const preview = make('span', 'result-preview', searchResultLabel(result));
+      button.append(title, make('span', 'result-name', result.name), preview);
+      button.addEventListener('click', () => {
+        closeDialog(els.searchDialog);
+        setActive(result.channel);
+        requestAnimationFrame(() => jumpTo(result.messageId));
+      });
+      li.append(button);
+      els.globalSearchResults.append(li);
+    }
+  } catch (error) {
+    if (request !== globalSearchRequest) return;
+    els.globalSearchStatus.textContent = `Search failed: ${error.message}`;
+  }
+}
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Number(seconds) || 0);
+  return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+}
+
+function callStateLabel(entry) {
+  if (entry.state === 'declined') return 'Declined';
+  if (entry.state === 'busy') return 'Busy';
+  if (entry.state === 'ringing') return 'Ringing';
+  if (entry.state === 'active') return 'In progress';
+  return entry.answeredAt ? `Ended · ${formatDuration(entry.duration)}` : 'No answer';
+}
+
+function renderCallHistory() {
+  els.callsList.replaceChildren();
+  if (callLog.length === 0) {
+    els.callsList.append(make('li', 'info-empty', 'No calls yet. Open a private chat to start an audio or video call.'));
+    return;
+  }
+
+  for (const entry of callLog) {
+    const li = make('li', 'info-item call-item');
+    const main = make('div', 'info-main');
+    const title = make('span', 'result-title');
+    const icon = entry.direction === 'outgoing' ? '↗' : '↙';
+    title.append(
+      make('strong', null, `${icon} ${entry.peerName || 'Unknown device'}`),
+      make('time', null, new Date(entry.createdAt).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })),
+    );
+    main.append(
+      title,
+      make('span', 'result-name', `${entry.withVideo ? 'Video' : 'Audio'} · ${callStateLabel(entry)}`),
+    );
+    li.append(main);
+    els.callsList.append(li);
+  }
+}
+
+function openCallHistory() {
+  closeChatMenu();
+  renderCallHistory();
+  openDialog(els.callsDialog, els.callsClose);
+}
+
+function deviceLabel(device, fallback) {
+  return device.label || fallback;
+}
+
+async function populateDevices() {
+  const selects = [
+    { el: els.micSelect, kind: 'audioinput', saved: settings.mic, fallback: 'Microphone' },
+    { el: els.camSelect, kind: 'videoinput', saved: settings.cam, fallback: 'Camera' },
+    { el: els.speakerSelect, kind: 'audiooutput', saved: settings.speaker, fallback: 'Speaker' },
+  ];
+  let devices = [];
+  try {
+    devices = await navigator.mediaDevices?.enumerateDevices?.() || [];
+  } catch {
+    devices = [];
+  }
+
+  for (const config of selects) {
+    const options = devices.filter((device) => device.kind === config.kind);
+    config.el.replaceChildren();
+    const fallbackOption = document.createElement('option');
+    fallbackOption.value = '';
+    fallbackOption.textContent = `Default ${config.fallback.toLowerCase()}`;
+    config.el.append(fallbackOption);
+
+    options.forEach((device, index) => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = deviceLabel(device, `${config.fallback} ${index + 1}`);
+      config.el.append(option);
+    });
+
+    if (config.saved && options.some((device) => device.deviceId === config.saved)) config.el.value = config.saved;
+  }
+
+  const hasLabels = devices.some((device) => device.label);
+  els.deviceNote.textContent = hasLabels
+    ? 'Changes apply to your next call and to the active speaker immediately.'
+    : 'Device names appear after you allow microphone/camera access.';
+}
+
+async function openDevices() {
+  closeChatMenu();
+  openDialog(els.devicesDialog, els.micSelect);
+  await populateDevices();
+}
+
+function applySpeaker() {
+  const media = [els.callRemoteAudio, els.callRemoteVideo];
+  for (const element of media) {
+    if (settings.speaker && element.setSinkId) {
+      element.setSinkId(settings.speaker).catch(() => {});
+    } else if (!settings.speaker && element.setSinkId && element.sinkId) {
+      element.setSinkId('').catch(() => {});
+    }
   }
 }
 
@@ -1964,6 +2965,26 @@ els.composer.addEventListener('drop', (event) => {
 });
 
 els.input.addEventListener('keydown', (event) => {
+  if (!els.mentionMenu.hidden && mentionQuery) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      mentionIndex = (mentionIndex + direction + mentionQuery.options.length) % mentionQuery.options.length;
+      updateMentionMenu();
+      return;
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      chooseMention(mentionQuery.options[mentionIndex]);
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      closeMentionMenu();
+      return;
+    }
+  }
+
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendMessage();
@@ -1971,8 +2992,7 @@ els.input.addEventListener('keydown', (event) => {
     const wasEditing = Boolean(editingId);
     clearComposerState();
     if (wasEditing) {
-      els.input.value = '';
-      autoResize();
+      loadDraft(activeId);
     }
   }
 });
@@ -1980,13 +3000,28 @@ els.input.addEventListener('keydown', (event) => {
 els.input.addEventListener('input', () => {
   autoResize();
   noteTyping();
+  saveDraft(activeId);
+  updateMentionMenu();
 });
 
-els.input.addEventListener('blur', stopTyping);
+els.input.addEventListener('paste', (event) => {
+  const files = [...(event.clipboardData?.files || [])];
+  if (files.length === 0) return;
+  event.preventDefault();
+  sendFiles(files);
+});
+
+els.input.addEventListener('click', updateMentionMenu);
+
+els.input.addEventListener('blur', () => {
+  stopTyping();
+  setTimeout(closeMentionMenu, 120);
+});
 
 els.bannerCancel.addEventListener('click', () => {
+  const wasEditing = Boolean(editingId);
   clearComposerState();
-  els.input.value = '';
+  if (wasEditing) loadDraft(activeId);
   autoResize();
   els.input.focus();
 });
@@ -1996,6 +3031,38 @@ els.messages.addEventListener('scroll', () => {
   if (isNearBottom()) {
     jumpCount = 0;
     updateJumpBadge();
+  }
+});
+
+els.messages.addEventListener('keydown', (event) => {
+  if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+    event.preventDefault();
+    moveMessageSelection(event.key === 'ArrowDown' ? 1 : -1);
+    return;
+  }
+  if (event.key === 'Home' || event.key === 'End') {
+    const rows = [...els.messages.querySelectorAll('.msg')];
+    if (rows.length === 0) return;
+    event.preventDefault();
+    selectMessageRow(event.key === 'Home' ? rows[0] : rows[rows.length - 1]);
+    return;
+  }
+
+  const row = event.target.closest?.('.msg');
+  if (!row) return;
+  const message = messageById(row.dataset.mid);
+  if (!message) return;
+  if (event.key === 'Enter' || event.key === ' ') {
+    event.preventDefault();
+    revealMessageActions(row);
+    row.querySelector('.msg-action')?.focus();
+  } else if (event.key.toLowerCase() === 'r') {
+    event.preventDefault();
+    startReply(message);
+  } else if (event.key.toLowerCase() === 'p') {
+    event.preventDefault();
+    const conversation = activeConversation();
+    if (conversation) togglePin(message, conversation);
   }
 });
 
@@ -2032,8 +3099,7 @@ els.toggleNotify.addEventListener('click', toggleNotifications);
 
 function askForName(firstTime) {
   els.nameInput.value = firstTime ? '' : me.name;
-  els.nameDialog.hidden = false;
-  els.nameInput.focus();
+  openDialog(els.nameDialog, els.nameInput);
   els.nameInput.select();
 }
 
@@ -2044,7 +3110,7 @@ els.nameForm.addEventListener('submit', (event) => {
   me.name = name;
   localStorage.setItem(NAME_KEY, name);
   els.meName.textContent = name;
-  els.nameDialog.hidden = true;
+  closeDialog(els.nameDialog);
   connect();
 });
 
@@ -2094,17 +3160,89 @@ window.addEventListener('pagehide', () => {
 });
 
 els.newGroup.addEventListener('click', openGroupDialog);
-els.groupCancel.addEventListener('click', () => {
-  els.groupDialog.hidden = true;
-});
+els.groupCancel.addEventListener('click', () => closeDialog(els.groupDialog));
 els.groupForm.addEventListener('submit', createGroup);
 els.groupDialog.addEventListener('click', (event) => {
-  if (event.target === els.groupDialog) els.groupDialog.hidden = true;
+  if (event.target === els.groupDialog) closeDialog(els.groupDialog);
 });
 
+els.newRoom.addEventListener('click', openRoomDialog);
+els.roomCancel.addEventListener('click', () => closeDialog(els.roomDialog));
+els.roomForm.addEventListener('submit', createRoom);
+els.roomDialog.addEventListener('click', (event) => {
+  if (event.target === els.roomDialog) closeDialog(els.roomDialog);
+});
+
+els.togglePins.addEventListener('click', openPins);
+els.pinsClose.addEventListener('click', () => closeDialog(els.pinsDialog));
+els.pinsDialog.addEventListener('click', (event) => {
+  if (event.target === els.pinsDialog) closeDialog(els.pinsDialog);
+});
+
+els.chatMenu.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleChatMenu();
+});
+els.menuSearch.addEventListener('click', openGlobalSearch);
+els.menuPins.addEventListener('click', () => {
+  closeChatMenu();
+  openPins();
+});
+els.menuExportHtml.addEventListener('click', () => exportConversation('html'));
+els.menuExportJson.addEventListener('click', () => exportConversation('json'));
+els.menuCalls.addEventListener('click', openCallHistory);
+els.menuDevices.addEventListener('click', openDevices);
+
+els.globalSearchInput.addEventListener('input', () => {
+  clearTimeout(globalSearchTimer);
+  globalSearchTimer = setTimeout(runGlobalSearch, 220);
+});
+els.globalSearchInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    clearTimeout(globalSearchTimer);
+    runGlobalSearch();
+  }
+});
+els.globalSearchClose.addEventListener('click', () => closeDialog(els.searchDialog));
+els.searchDialog.addEventListener('click', (event) => {
+  if (event.target === els.searchDialog) closeDialog(els.searchDialog);
+});
+
+els.callsClose.addEventListener('click', () => closeDialog(els.callsDialog));
+els.callsDialog.addEventListener('click', (event) => {
+  if (event.target === els.callsDialog) closeDialog(els.callsDialog);
+});
+
+els.micSelect.addEventListener('change', () => {
+  settings.mic = els.micSelect.value;
+  localStorage.setItem(MIC_KEY, settings.mic);
+});
+els.camSelect.addEventListener('change', () => {
+  settings.cam = els.camSelect.value;
+  localStorage.setItem(CAM_KEY, settings.cam);
+});
+els.speakerSelect.addEventListener('change', () => {
+  settings.speaker = els.speakerSelect.value;
+  localStorage.setItem(SPEAKER_KEY, settings.speaker);
+  applySpeaker();
+});
+els.devicesClose.addEventListener('click', () => closeDialog(els.devicesDialog));
+els.devicesDialog.addEventListener('click', (event) => {
+  if (event.target === els.devicesDialog) closeDialog(els.devicesDialog);
+});
+
+els.callShare.addEventListener('click', toggleScreenShare);
+els.callDevices.addEventListener('click', openDevices);
+
 document.addEventListener('click', (event) => {
-  if (event.target.closest('.reaction-picker')) return;
-  document.querySelectorAll('.reaction-picker').forEach((picker) => picker.remove());
+  if (!event.target.closest('.reaction-picker')) {
+    document.querySelectorAll('.reaction-picker').forEach((picker) => picker.remove());
+  }
+  if (!event.target.closest('.msg')) {
+    document.querySelectorAll('.msg.actions-open').forEach((row) => row.classList.remove('actions-open'));
+  }
+  if (!event.target.closest('.menu-wrap')) closeChatMenu();
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -2117,19 +3255,50 @@ document.addEventListener('visibilitychange', () => {
 });
 
 document.addEventListener('keydown', (event) => {
+  trapDialogFocus(event);
+
   if (event.key === 'Escape') {
-    if (!els.groupDialog.hidden) els.groupDialog.hidden = true;
-    else if (els.nameDialog.hidden && !els.searchbar.hidden) closeSearch();
+    const dialog = topOpenDialog();
+    if (dialog) {
+      if (dialog === els.nameDialog && !me.name) return;
+      if (dialog === els.groupDialog) closeDialog(els.groupDialog);
+      else if (dialog === els.roomDialog) closeDialog(els.roomDialog);
+      else if (dialog === els.pinsDialog) closeDialog(els.pinsDialog);
+      else if (dialog === els.searchDialog) closeDialog(els.searchDialog);
+      else if (dialog === els.callsDialog) closeDialog(els.callsDialog);
+      else if (dialog === els.devicesDialog) closeDialog(els.devicesDialog);
+      else closeDialog(dialog);
+      return;
+    }
+    if (!els.chatMenuPanel.hidden) {
+      closeChatMenu();
+      els.chatMenu.focus();
+      return;
+    }
+    if (!els.searchbar.hidden) closeSearch();
+    if (!els.mentionMenu.hidden) closeMentionMenu();
   }
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && els.nameDialog.hidden) {
+
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && !topOpenDialog()) {
     event.preventDefault();
     openSearch();
   }
 });
 
+document.addEventListener('hashchange', () => applyDeepLink());
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // PWA support is optional and requires a secure context.
+    });
+  });
+}
+
 applyTheme(settings.theme);
 syncSettingButtons();
 renderChannels();
+loadDraft(activeId);
 
 if (me.name) {
   els.meName.textContent = me.name;
