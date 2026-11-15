@@ -1,8 +1,27 @@
 const ID_KEY = 'lanchat.id';
 const NAME_KEY = 'lanchat.name';
 const CHANNEL_KEY = 'lanchat.channel';
-const MAX_NAME = 24;
-const MAX_GROUP_NAME = 40;
+const SEEN_KEY = 'lanchat.seen';
+const THEME_KEY = 'lanchat.theme';
+const SOUND_KEY = 'lanchat.sound';
+const NOTIFY_KEY = 'lanchat.notify';
+
+let MAX_NAME = 24;
+let MAX_GROUP_NAME = 40;
+let MAX_TEXT = 4000;
+
+const ICONS = {
+  react: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.4a4.5 4.5 0 0 0 7 0"/><path d="M9 9.5h.01M15 9.5h.01"/></svg>',
+  reply: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 17 4 12l5-5"/><path d="M4 12h9a7 7 0 0 1 7 7"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>',
+  edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L20 8l-4-4L4 16v4Z"/></svg>',
+  delete: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>',
+  download: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M7 10l5 5 5-5M5 19h14"/></svg>',
+  close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+};
+
+const REACTION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🎉', '🔥', '👀', '✅', '🙏'];
+const REACTION_MAX = 10;
 
 const els = {
   messages: document.getElementById('messages'),
@@ -26,6 +45,10 @@ const els = {
   copyLink: document.getElementById('copy-link'),
   toggleMenu: document.getElementById('toggle-menu'),
   toggleMembers: document.getElementById('toggle-members'),
+  toggleTheme: document.getElementById('toggle-theme'),
+  toggleSearch: document.getElementById('toggle-search'),
+  toggleSound: document.getElementById('toggle-sound'),
+  toggleNotify: document.getElementById('toggle-notify'),
   newGroup: document.getElementById('new-group'),
   groupDialog: document.getElementById('group-dialog'),
   groupForm: document.getElementById('group-form'),
@@ -35,6 +58,18 @@ const els = {
   groupCancel: document.getElementById('group-cancel'),
   scrim: document.getElementById('scrim'),
   app: document.getElementById('app'),
+  searchbar: document.getElementById('searchbar'),
+  searchInput: document.getElementById('search-input'),
+  searchCount: document.getElementById('search-count'),
+  searchClose: document.getElementById('search-close'),
+  scrollBottom: document.getElementById('scroll-bottom'),
+  jumpBadge: document.getElementById('jump-badge'),
+  banner: document.getElementById('composer-banner'),
+  bannerIcon: document.getElementById('banner-icon'),
+  bannerTitle: document.getElementById('banner-title'),
+  bannerText: document.getElementById('banner-text'),
+  bannerCancel: document.getElementById('banner-cancel'),
+  toast: document.getElementById('toast'),
   callButtons: document.getElementById('call-buttons'),
   callAudioBtn: document.getElementById('call-audio'),
   callVideoBtn: document.getElementById('call-video'),
@@ -61,17 +96,43 @@ function getDeviceId() {
   return id;
 }
 
+function loadSeen() {
+  try {
+    return JSON.parse(localStorage.getItem(SEEN_KEY) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+
 const me = { id: getDeviceId(), name: localStorage.getItem(NAME_KEY) || '' };
+const settings = {
+  theme: localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark',
+  sound: localStorage.getItem(SOUND_KEY) !== '0',
+  notify: localStorage.getItem(NOTIFY_KEY) === '1',
+};
+
 let source = null;
 let users = [];
 let conversations = [];
+let seen = loadSeen();
 let activeId = localStorage.getItem(CHANNEL_KEY) || 'general';
-let renderedId = null;
-let renderedCount = -1;
-let renderedLastId = null;
+let typingByChannel = new Map();
+let replyTo = null;
+let editingId = null;
+let searchQuery = '';
+let uploadInProgress = false;
+let jumpCount = 0;
+const sentReads = new Set();
+
+function make(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
 
 function initials(name) {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return '?';
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
@@ -79,12 +140,27 @@ function initials(name) {
 
 function avatarColor(name) {
   let hash = 0;
-  for (const char of name) hash = (hash * 31 + char.codePointAt(0)) % 360;
+  for (const char of String(name || '')) hash = (hash * 31 + char.codePointAt(0)) % 360;
   return `hsl(${hash} 68% 64%)`;
 }
 
 function formatTime(timestamp) {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function formatDay(timestamp) {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return 'Today';
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return date.toLocaleDateString([], {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric',
+  });
 }
 
 function humanFileSize(bytes) {
@@ -101,41 +177,36 @@ function humanFileSize(bytes) {
 }
 
 function fileExtension(name) {
-  const match = /\.([a-z0-9]{1,4})$/i.exec(name || '');
+  const match = /\.([a-z0-9]{1,5})$/i.exec(name || '');
   return match ? match[1].toUpperCase() : 'FILE';
 }
 
-function buildFileBubble(message) {
-  const { file } = message;
-  const wrap = document.createElement('div');
-  wrap.className = 'file-msg';
+function linkify(text) {
+  const fragment = document.createDocumentFragment();
+  const pattern = /(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = pattern.exec(text))) {
+    if (match.index > lastIndex) fragment.append(text.slice(lastIndex, match.index));
+    const link = make('a', 'msg-link', match[0]);
+    link.href = match[0];
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    fragment.append(link);
+    lastIndex = match.index + match[0].length;
+  }
+  if (lastIndex < text.length) fragment.append(text.slice(lastIndex));
+  return fragment;
+}
 
-  const icon = document.createElement('div');
-  icon.className = 'file-icon';
-  icon.textContent = fileExtension(file.name);
-
-  const meta = document.createElement('div');
-  meta.className = 'file-meta';
-
-  const name = document.createElement('span');
-  name.className = 'file-name';
-  name.textContent = file.name;
-  name.title = file.name;
-
-  const size = document.createElement('span');
-  size.className = 'file-size';
-  size.textContent = humanFileSize(file.size);
-
-  meta.append(name, size);
-
-  const download = document.createElement('a');
-  download.className = 'file-download';
-  download.textContent = 'Download';
-  download.href = `/api/files/${encodeURIComponent(file.id)}?id=${encodeURIComponent(me.id)}`;
-  download.download = file.name;
-
-  wrap.append(icon, meta, download);
-  return wrap;
+function toast(text, kind) {
+  els.toast.textContent = text;
+  els.toast.className = `toast ${kind || ''}`.trim();
+  els.toast.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => {
+    els.toast.hidden = true;
+  }, 2600);
 }
 
 function setStatus(text, state) {
@@ -151,6 +222,10 @@ function getConversation(id) {
   return conversations.find((conversation) => conversation.id === id);
 }
 
+function activeConversation() {
+  return getConversation(activeId) || null;
+}
+
 function isNearBottom() {
   const el = els.messages;
   return el.scrollHeight - el.scrollTop - el.clientHeight < 120;
@@ -158,76 +233,72 @@ function isNearBottom() {
 
 function scrollToBottom() {
   els.messages.scrollTop = els.messages.scrollHeight;
+  jumpCount = 0;
+  updateJumpBadge();
 }
 
-function showEmptyState(conversation) {
-  const empty = document.createElement('div');
-  empty.className = 'empty';
-
-  const logo = document.createElement('img');
-  logo.src = '/logo.svg';
-  logo.alt = '';
-
-  const title = document.createElement('strong');
-
-  if (!conversation || conversation.type === 'general') {
-    title.textContent = 'Welcome to Chatterbox';
-    empty.append(
-      logo,
-      title,
-      'Send the first message — everyone who opens this address on the same network will see it instantly.',
-    );
-  } else if (conversation.type === 'dm') {
-    title.textContent = `Chat with ${conversation.name}`;
-    empty.append(
-      logo,
-      title,
-      'This is a private conversation. Only the two of you can see these messages.',
-    );
+function updateJumpBadge() {
+  if (jumpCount > 0) {
+    els.jumpBadge.textContent = jumpCount > 9 ? '9+' : String(jumpCount);
+    els.jumpBadge.hidden = false;
   } else {
-    title.textContent = conversation.name;
-    empty.append(
-      logo,
-      title,
-      `This is the start of the group chat with ${conversation.members?.length || 0} members.`,
-    );
+    els.jumpBadge.hidden = true;
   }
-
-  els.messages.replaceChildren(empty);
 }
 
-function appendMessageRow(message, { scroll = true } = {}) {
-  const row = document.createElement('div');
-  row.className = message.userId === me.id ? 'msg mine' : 'msg';
+function updateScrollButton() {
+  els.scrollBottom.hidden = isNearBottom();
+  updateJumpBadge();
+}
 
-  const avatar = document.createElement('div');
-  avatar.className = 'avatar';
-  avatar.textContent = initials(message.name);
-  avatar.style.background = avatarColor(message.name);
+function saveSeen() {
+  try {
+    localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+  } catch {
+    // Storage may be full or unavailable.
+  }
+}
 
-  const body = document.createElement('div');
-  body.className = 'msg-body';
+function markSeen(conversation) {
+  if (!conversation) return;
+  const history = conversation.history || [];
+  if (history.length === 0) return;
+  const last = history[history.length - 1].time;
+  if (last > (seen[conversation.id] || 0)) {
+    seen[conversation.id] = last;
+    saveSeen();
+    updateTitle();
+  }
+}
 
-  const head = document.createElement('div');
-  head.className = 'msg-head';
-  const name = document.createElement('span');
-  name.className = 'name';
-  name.textContent = message.userId === me.id ? `${message.name} (you)` : message.name;
-  const time = document.createElement('span');
-  time.textContent = formatTime(message.time);
-  head.append(name, time);
+function unreadCount(conversation) {
+  if (!conversation || conversation.id === activeId) return 0;
+  const since = seen[conversation.id] || 0;
+  return (conversation.history || []).filter((message) => message.userId !== me.id && message.time > since).length;
+}
 
-  const text = document.createElement('div');
-  text.className = 'msg-text';
-  text.textContent = message.text;
+function totalUnread() {
+  return conversations.reduce((total, conversation) => total + unreadCount(conversation), 0);
+}
 
-  if (message.kind === 'file' && message.file) body.append(head, buildFileBubble(message));
-  else body.append(head, text);
-  row.append(avatar, body);
+function updateTitle() {
+  const count = totalUnread();
+  document.title = count > 0 ? `(${count}) Chatterbox` : 'Chatterbox';
+}
 
-  const stick = scroll && isNearBottom();
-  els.messages.append(row);
-  if (stick) scrollToBottom();
+/* ---------- Header ---------- */
+
+function baseSubtitle(conversation) {
+  if (!conversation) return 'No messages yet';
+  if (conversation.type === 'dm') {
+    const peer = users.find((user) => user.id === conversation.peerId);
+    return peer ? 'Online now' : 'Offline';
+  }
+  if (conversation.type === 'group') {
+    return `${conversation.members?.length || 0} member${conversation.members?.length === 1 ? '' : 's'}`;
+  }
+  const online = users.length;
+  return `${online} online · ${conversation.history?.length || 0} message${conversation.history?.length === 1 ? '' : 's'}`;
 }
 
 function updateHeader(conversation) {
@@ -244,7 +315,7 @@ function updateHeader(conversation) {
 
   updateCallButtons(conversation);
   els.roomTitle.textContent = conversation.name;
-  els.roomIcon.className = `room-icon ${conversation.type === 'dm' ? 'dm' : conversation.type}`;
+  els.roomIcon.className = `room-icon ${conversation.type}`;
 
   if (conversation.type === 'dm') {
     els.roomIcon.textContent = initials(conversation.name);
@@ -262,73 +333,344 @@ function updateHeader(conversation) {
     els.input.placeholder = `Message ${conversation.name}…`;
   }
 
-  const history = conversation.history || [];
-  if (history.length === 0) {
-    els.subtitle.textContent = conversation.type === 'dm'
-      ? 'Private conversation'
-      : conversation.type === 'group'
-        ? `${conversation.members?.length || 0} members`
-        : 'No messages yet';
+  els.subtitle.textContent = baseSubtitle(conversation);
+}
+
+/* ---------- Message rendering ---------- */
+
+function messagePreview(message) {
+  if (!message) return 'No messages yet';
+  if (message.kind === 'file') return `📎 ${message.file?.name || 'Attachment'}`;
+  return message.text || '';
+}
+
+function emptyState(conversation) {
+  const empty = make('div', 'empty');
+  const logo = make('img');
+  logo.src = '/logo.svg';
+  logo.alt = '';
+  const title = make('strong');
+  if (!conversation || conversation.type === 'general') {
+    title.textContent = 'Welcome to Chatterbox';
+    empty.append(
+      logo,
+      title,
+      'Send the first message — everyone who opens this address on the same network will see it instantly.',
+    );
+  } else if (conversation.type === 'dm') {
+    title.textContent = `Chat with ${conversation.name}`;
+    empty.append(logo, title, 'This is a private conversation. Only the two of you can see these messages.');
   } else {
-    const last = history[history.length - 1];
-    els.subtitle.textContent = `${history.length} message${history.length === 1 ? '' : 's'} · last at ${formatTime(last.time)}`;
+    title.textContent = conversation.name;
+    empty.append(logo, title, `This is the start of the group chat with ${conversation.members?.length || 0} members.`);
+  }
+  return empty;
+}
+
+function daySeparator(label) {
+  return make('div', 'day-separator', label);
+}
+
+function buildReplyQuote(message) {
+  const quote = make('button', 'reply-quote');
+  quote.type = 'button';
+  const name = make('span', 'reply-name', message.replyTo.name);
+  const text = make('span', 'reply-text', message.replyTo.text);
+  quote.append(name, text);
+  quote.addEventListener('click', () => jumpTo(message.replyTo.id));
+  return quote;
+}
+
+function fileUrl(file, inline) {
+  return `/api/files/${encodeURIComponent(file.id)}?id=${encodeURIComponent(me.id)}${inline ? '&inline=1' : ''}`;
+}
+
+function buildFileBubble(message) {
+  const file = message.file;
+  const wrap = make('div', 'file-msg');
+  const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
+
+  if (isImage) {
+    wrap.classList.add('has-preview');
+    const img = make('img', 'file-preview');
+    img.loading = 'lazy';
+    img.alt = file.name;
+    img.src = fileUrl(file, true);
+    img.addEventListener('click', () => window.open(fileUrl(file, true), '_blank', 'noopener'));
+    wrap.append(img);
+  }
+
+  const row = make('div', 'file-row');
+  const icon = make('div', 'file-icon', fileExtension(file.name));
+  const meta = make('div', 'file-meta');
+  const name = make('span', 'file-name', file.name);
+  name.title = file.name;
+  const size = make('span', 'file-size', humanFileSize(file.size));
+  meta.append(name, size);
+
+  const download = make('a', 'file-download');
+  download.href = fileUrl(file, false);
+  download.download = file.name;
+  download.innerHTML = `${ICONS.download}<span>Save</span>`;
+
+  row.append(icon, meta, download);
+  wrap.append(row);
+  return wrap;
+}
+
+function statusText(message, conversation) {
+  if (message.userId !== me.id || !conversation) return '';
+  const readBy = (message.readBy || []).filter((id) => id !== me.id);
+  if (conversation.type === 'dm') return readBy.includes(conversation.peerId) ? '✓✓ seen' : '✓';
+  if (conversation.type === 'group') return readBy.length ? `✓✓ ${readBy.length}` : '✓';
+  return '';
+}
+
+function buildReactionChips(message, conversation) {
+  const entries = Object.entries(message.reactions || {});
+  if (entries.length === 0) return null;
+  const wrap = make('div', 'msg-reactions');
+  for (const [emoji, ids] of entries) {
+    if (!ids || ids.length === 0) continue;
+    const chip = make('button', 'reaction-chip');
+    chip.type = 'button';
+    chip.append(make('span', 'reaction-emoji', emoji), make('span', 'reaction-count', String(ids.length)));
+    if (ids.includes(me.id)) chip.classList.add('active');
+    chip.title = ids.length === 1 ? '1 reaction' : `${ids.length} reactions`;
+    chip.addEventListener('click', () => toggleReaction(message, conversation, emoji));
+    wrap.append(chip);
+  }
+  return wrap.children.length ? wrap : null;
+}
+
+function actionButton(icon, title, handler) {
+  const button = make('button', 'msg-action');
+  button.type = 'button';
+  button.title = title;
+  button.setAttribute('aria-label', title);
+  button.innerHTML = icon;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    handler();
+  });
+  return button;
+}
+
+function openReactionPicker(row, message, conversation) {
+  document.querySelectorAll('.reaction-picker').forEach((picker) => picker.remove());
+  const picker = make('div', 'reaction-picker');
+  for (const emoji of REACTION_EMOJIS) {
+    const button = make('button', 'reaction-option', emoji);
+    button.type = 'button';
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      picker.remove();
+      toggleReaction(message, conversation, emoji);
+    });
+    picker.append(button);
+  }
+  picker.addEventListener('click', (event) => event.stopPropagation());
+  row.append(picker);
+}
+
+function buildMessageRow(message, conversation, previous) {
+  const mine = message.userId === me.id;
+  const grouped =
+    previous &&
+    previous.userId === message.userId &&
+    !previous.kind &&
+    !message.kind &&
+    message.time - previous.time < 5 * 60 * 1000;
+
+  const row = make('div', `msg${mine ? ' mine' : ''}${grouped ? ' grouped' : ''}`);
+  row.dataset.mid = message.id;
+
+  if (grouped) {
+    row.append(make('div', 'avatar avatar-spacer'));
+  } else {
+    const avatar = make('div', 'avatar', initials(message.name));
+    avatar.style.background = avatarColor(message.name);
+    row.append(avatar);
+  }
+
+  const body = make('div', 'msg-body');
+
+  if (!grouped) {
+    const head = make('div', 'msg-head');
+    const name = make('span', 'name', mine ? `${message.name} (you)` : message.name);
+    const time = make('span', 'msg-time', formatTime(message.time));
+    head.append(name, time);
+    body.append(head);
+  }
+
+  if (message.replyTo) body.append(buildReplyQuote(message));
+
+  if (message.kind === 'file' && message.file) {
+    body.append(buildFileBubble(message));
+  } else {
+    const text = make('div', 'msg-text');
+    text.append(linkify(message.text || ''));
+    body.append(text);
+  }
+
+  const reactions = buildReactionChips(message, conversation);
+  if (reactions) body.append(reactions);
+
+  const foot = make('div', 'msg-foot');
+  foot.append(make('span', 'msg-time', grouped ? formatTime(message.time) : ''));
+  if (message.editedAt) foot.append(make('span', 'msg-edited', 'edited'));
+  const status = statusText(message, conversation);
+  if (status) foot.append(make('span', 'msg-status', status));
+  body.append(foot);
+
+  const actions = make('div', 'msg-actions');
+  const reactButton = actionButton(ICONS.react, 'Add reaction', () => openReactionPicker(row, message, conversation));
+  const replyButton = actionButton(ICONS.reply, 'Reply', () => startReply(message));
+  const copyButton = actionButton(ICONS.copy, 'Copy text', () => {
+    if (!message.text) return;
+    if (!navigator.clipboard) {
+      toast('Copy is not available here', 'error');
+      return;
+    }
+    navigator.clipboard.writeText(message.text).then(
+      () => toast('Copied to clipboard'),
+      () => toast('Could not copy', 'error'),
+    );
+  });
+  actions.append(reactButton, replyButton, copyButton);
+
+  if (mine) {
+    if (message.kind !== 'file') {
+      actions.append(
+        actionButton(ICONS.edit, 'Edit message', () => startEdit(message)),
+      );
+    }
+    actions.append(
+      actionButton(ICONS.delete, 'Delete message', () => deleteMessage(message, conversation)),
+    );
+  }
+
+  body.append(actions);
+  row.append(body);
+  return row;
+}
+
+function typingNames(conversation) {
+  const list = typingByChannel.get(conversation?.id) || [];
+  return list.filter((user) => user.id !== me.id).map((user) => user.name);
+}
+
+function typingLabel(conversation) {
+  const names = typingNames(conversation);
+  if (names.length === 0) return '';
+  if (names.length === 1) return `${names[0]} is typing…`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are typing…`;
+  return `${names.length} people are typing…`;
+}
+
+function updateTyping(conversation) {
+  const indicator = els.messages.querySelector('.typing-indicator');
+  const label = typingLabel(conversation);
+  if (indicator) {
+    indicator.hidden = !label;
+    indicator.textContent = label;
+  }
+  if (conversation && conversation.id === activeId) {
+    els.subtitle.textContent = label || baseSubtitle(conversation);
   }
 }
 
-function renderActiveConversation() {
-  const conversation = getConversation(activeId) || conversations[0];
-
+function renderMessages({ scroll = true } = {}) {
+  const conversation = activeConversation();
   if (!conversation) {
-    renderedId = null;
-    renderedCount = -1;
-    renderedLastId = null;
+    els.messages.replaceChildren(emptyState(null));
     updateHeader(null);
-    showEmptyState(null);
+    updateScrollButton();
     return;
   }
 
-  if (conversation.id !== activeId) {
-    activeId = conversation.id;
-    localStorage.setItem(CHANNEL_KEY, activeId);
-  }
-
-  updateHeader(conversation);
-  if (conversation.unread) {
-    conversation.unread = 0;
-    renderChannels();
-  }
-
+  const wasNearBottom = isNearBottom();
+  const previousScroll = els.messages.scrollTop;
   const history = conversation.history || [];
-  const lastId = history.length ? history[history.length - 1].id : null;
-  if (conversation.id === renderedId && history.length === renderedCount && lastId === renderedLastId) return;
+  const query = searchQuery.trim().toLowerCase();
+  const visible = query
+    ? history.filter(
+        (message) =>
+          (message.text || '').toLowerCase().includes(query) ||
+          (message.name || '').toLowerCase().includes(query) ||
+          (message.file?.name || '').toLowerCase().includes(query),
+      )
+    : history;
 
-  renderedId = conversation.id;
-  renderedCount = history.length;
-  renderedLastId = lastId;
-
-  els.messages.replaceChildren();
-  if (history.length === 0) {
-    showEmptyState(conversation);
-    return;
+  const fragment = document.createDocumentFragment();
+  if (visible.length === 0) {
+    if (query) {
+      const empty = make('div', 'empty');
+      const strong = make('strong', null, 'No matches');
+      empty.append(strong, `Nothing matches “${searchQuery.trim()}” in this conversation.`);
+      fragment.append(empty);
+    } else {
+      fragment.append(emptyState(conversation));
+    }
+  } else {
+    let lastDay = '';
+    let previous = null;
+    for (const message of visible) {
+      const day = formatDay(message.time);
+      if (day !== lastDay) {
+        lastDay = day;
+        fragment.append(daySeparator(day));
+        previous = null;
+      }
+      fragment.append(buildMessageRow(message, conversation, previous));
+      previous = message;
+    }
   }
 
-  for (const message of history) appendMessageRow(message, { scroll: false });
-  scrollToBottom();
+  const indicator = make('div', 'typing-indicator');
+  indicator.hidden = true;
+  fragment.append(indicator);
+
+  els.messages.replaceChildren(fragment);
+  els.searchCount.textContent = query ? `${visible.length} found` : '';
+  updateTyping(conversation);
+
+  if (scroll || wasNearBottom) scrollToBottom();
+  else els.messages.scrollTop = previousScroll;
+
+  updateScrollButton();
+  if (!query) markReads(conversation);
+}
+
+function jumpTo(messageId) {
+  const target = els.messages.querySelector(`[data-mid="${CSS.escape(messageId)}"]`);
+  if (!target) return;
+  target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  target.classList.add('highlight');
+  setTimeout(() => target.classList.remove('highlight'), 1300);
+}
+
+/* ---------- Channels / users ---------- */
+
+function sortedConversations() {
+  return [...conversations].sort((a, b) => {
+    if (a.id === 'general') return -1;
+    if (b.id === 'general') return 1;
+    return (b.lastTime || 0) - (a.lastTime || 0);
+  });
 }
 
 function renderChannels() {
   els.channels.replaceChildren();
 
-  for (const conversation of conversations) {
-    const li = document.createElement('li');
-    li.className = 'channel';
+  for (const conversation of sortedConversations()) {
+    const li = make('li', 'channel');
     if (conversation.id === activeId) li.classList.add('active');
     li.tabIndex = 0;
     li.setAttribute('role', 'button');
     li.title = conversation.name;
 
-    const icon = document.createElement('div');
-    icon.className = 'avatar channel-avatar';
+    const icon = make('div', 'avatar channel-avatar');
     if (conversation.type === 'dm') {
       icon.textContent = initials(conversation.name);
       icon.style.background = avatarColor(conversation.name);
@@ -342,23 +684,28 @@ function renderChannels() {
       icon.classList.add('room');
     }
 
-    const label = document.createElement('span');
-    label.className = 'channel-name';
-    label.textContent = conversation.name;
+    const main = make('div', 'channel-main');
+    const top = make('div', 'channel-top');
+    const label = make('span', 'channel-name', conversation.name);
+    const last = conversation.history?.[conversation.history.length - 1];
+    const time = make('span', 'channel-time', last ? formatTime(last.time) : '');
+    top.append(label, time);
 
-    li.append(icon, label);
+    const bottom = make('div', 'channel-bottom');
+    const preview = make('span', 'channel-preview', messagePreview(last));
+    if (last && last.kind === 'file') preview.classList.add('muted');
+    bottom.append(preview);
 
-    if (conversation.unread) {
-      const badge = document.createElement('span');
-      badge.className = 'unread';
-      badge.textContent = conversation.unread > 99 ? '99+' : String(conversation.unread);
-      li.append(badge);
+    const unread = unreadCount(conversation);
+    if (unread > 0) {
+      const badge = make('span', 'unread', unread > 99 ? '99+' : String(unread));
+      bottom.append(badge);
     } else if (conversation.type === 'group') {
-      const count = document.createElement('span');
-      count.className = 'tag';
-      count.textContent = String(conversation.members?.length || 0);
-      li.append(count);
+      bottom.append(make('span', 'tag', String(conversation.members?.length || 0)));
     }
+
+    main.append(top, bottom);
+    li.append(icon, main);
 
     const activate = () => setActive(conversation.id);
     li.addEventListener('click', activate);
@@ -371,6 +718,7 @@ function renderChannels() {
 
     els.channels.append(li);
   }
+  updateTitle();
 }
 
 function renderUsers() {
@@ -378,24 +726,20 @@ function renderUsers() {
   els.users.replaceChildren();
 
   for (const user of users) {
-    const li = document.createElement('li');
+    const li = make('li');
     if (user.id === me.id) li.classList.add('is-me');
 
-    const avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.textContent = initials(user.name);
+    const avatar = make('div', 'avatar', initials(user.name));
     avatar.style.background = avatarColor(user.name);
 
-    const label = document.createElement('span');
-    label.textContent = user.name;
+    const label = make('span', 'user-name', user.name);
+    const dot = make('span', 'presence-dot');
+    dot.title = 'Online';
 
-    li.append(avatar, label);
+    li.append(avatar, label, dot);
 
     if (user.id === me.id) {
-      const you = document.createElement('span');
-      you.className = 'you';
-      you.textContent = 'you';
-      li.append(you);
+      li.append(make('span', 'you', 'you'));
     } else {
       li.classList.add('clickable');
       li.title = `Send ${user.name} a private message`;
@@ -404,16 +748,28 @@ function renderUsers() {
 
     els.users.append(li);
   }
+
+  const conversation = activeConversation();
+  if (conversation) updateHeader(conversation);
 }
 
 function setActive(id) {
   const conversation = getConversation(id);
   if (!conversation) return;
+  const wasEditing = Boolean(editingId);
+  markSeen(activeConversation());
   activeId = id;
-  conversation.unread = 0;
   localStorage.setItem(CHANNEL_KEY, activeId);
+  markSeen(conversation);
+  clearComposerState();
+  if (wasEditing) {
+    els.input.value = '';
+    autoResize();
+  }
+  closeSearch();
   renderChannels();
-  renderActiveConversation();
+  updateHeader(conversation);
+  renderMessages({ scroll: true });
   els.app.classList.remove('sidebar-open', 'members-open');
   els.input.focus();
 }
@@ -427,12 +783,344 @@ function openDm(peer) {
       type: 'dm',
       name: peer.name,
       peerId: peer.id,
+      online: true,
       history: [],
       unread: 0,
       lastTime: Date.now(),
     });
   }
   setActive(id);
+}
+
+/* ---------- Message actions ---------- */
+
+async function apiJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Server responded ${response.status}`);
+  return data;
+}
+
+function postJson(url, body) {
+  return apiJson(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function upsertMessage(message) {
+  const conversation = getConversation(message.channel);
+  if (!conversation) return;
+  conversation.history = conversation.history || [];
+  const index = conversation.history.findIndex((entry) => entry.id === message.id);
+  if (index >= 0) conversation.history[index] = { ...conversation.history[index], ...message };
+  else conversation.history.push(message);
+  conversation.lastTime = message.time;
+  if (conversation.id === activeId) renderMessages({ scroll: false });
+  renderChannels();
+}
+
+async function toggleReaction(message, conversation, emoji) {
+  const existing = message.reactions?.[emoji] || [];
+  const action = existing.includes(me.id) ? 'remove' : 'add';
+  try {
+    const data = await postJson('/api/reactions', {
+      messageId: message.id,
+      userId: me.id,
+      emoji,
+      action,
+      channel: conversation.id,
+    });
+    if (data.message) upsertMessage(data.message);
+  } catch (error) {
+    toast(`Reaction failed: ${error.message}`, 'error');
+  }
+}
+
+function startReply(message) {
+  editingId = null;
+  replyTo = {
+    id: message.id,
+    name: message.name,
+    text: (message.kind === 'file' ? message.file?.name : message.text || '').slice(0, 140),
+  };
+  updateComposerBanner();
+  els.input.focus();
+}
+
+function startEdit(message) {
+  replyTo = null;
+  editingId = message.id;
+  updateComposerBanner();
+  els.input.value = message.text || '';
+  autoResize();
+  els.input.focus();
+  els.input.setSelectionRange(els.input.value.length, els.input.value.length);
+}
+
+async function deleteMessage(message, conversation) {
+  if (!window.confirm('Delete this message? This cannot be undone.')) return;
+  try {
+    await postJson('/api/messages/delete', {
+      id: me.id,
+      channel: conversation.id,
+      messageId: message.id,
+    });
+    conversation.history = (conversation.history || []).filter((entry) => entry.id !== message.id);
+    if (conversation.id === activeId) renderMessages({ scroll: false });
+    renderChannels();
+    if (editingId === message.id) clearComposerState();
+  } catch (error) {
+    toast(`Could not delete: ${error.message}`, 'error');
+  }
+}
+
+function clearComposerState() {
+  replyTo = null;
+  editingId = null;
+  updateComposerBanner();
+}
+
+function updateComposerBanner() {
+  if (editingId) {
+    const conversation = activeConversation();
+    const message = conversation?.history?.find((entry) => entry.id === editingId);
+    els.banner.hidden = false;
+    els.banner.classList.add('editing');
+    els.bannerIcon.textContent = '✎';
+    els.bannerTitle.textContent = 'Editing message';
+    els.bannerText.textContent = message ? message.text : '';
+    return;
+  }
+  if (replyTo) {
+    els.banner.hidden = false;
+    els.banner.classList.remove('editing');
+    els.bannerIcon.textContent = '↩';
+    els.bannerTitle.textContent = `Replying to ${replyTo.name}`;
+    els.bannerText.textContent = replyTo.text;
+    return;
+  }
+  els.banner.hidden = true;
+  els.banner.classList.remove('editing');
+}
+
+/* ---------- Read receipts ---------- */
+
+function markReads(conversation) {
+  if (!conversation || document.hidden || conversation.id !== activeId) return;
+  const history = conversation.history || [];
+  const pending = history
+    .filter((message) => message.userId !== me.id && !(message.readBy || []).includes(me.id) && !sentReads.has(message.id))
+    .slice(-40);
+  for (const message of pending) {
+    sentReads.add(message.id);
+    postJson('/api/read-receipt', {
+      messageId: message.id,
+      userId: me.id,
+      channel: conversation.id,
+    }).catch(() => sentReads.delete(message.id));
+  }
+}
+
+/* ---------- Typing ---------- */
+
+let typingTimer = null;
+let typingSent = false;
+
+function sendTypingState(active) {
+  const conversation = activeConversation();
+  if (!conversation) return;
+  postJson('/api/typing', {
+    userId: me.id,
+    type: active ? 'start' : 'stop',
+    channel: conversation.id,
+  }).catch(() => {});
+}
+
+function stopTyping() {
+  if (!typingSent) return;
+  typingSent = false;
+  clearTimeout(typingTimer);
+  sendTypingState(false);
+}
+
+function noteTyping() {
+  if (!els.input.value.trim()) {
+    stopTyping();
+    return;
+  }
+  if (!typingSent) {
+    typingSent = true;
+    sendTypingState(true);
+  }
+  clearTimeout(typingTimer);
+  typingTimer = setTimeout(stopTyping, 1800);
+}
+
+/* ---------- Sounds & notifications ---------- */
+
+let audioCtx = null;
+
+function beep(frequency, duration, volume) {
+  if (!settings.sound) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    audioCtx = audioCtx || new Ctx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.value = frequency || 720;
+    const now = audioCtx.currentTime;
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(volume || 0.07, now + 0.015);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + (duration || 0.16));
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + (duration || 0.16) + 0.03);
+  } catch {
+    // Audio is optional.
+  }
+}
+
+function showNotification(conversation, message) {
+  if (!settings.notify || !('Notification' in window) || Notification.permission !== 'granted') return;
+  const body = message.kind === 'file' ? `Sent a file: ${message.file?.name || ''}` : message.text || '';
+  try {
+    const notification = new Notification(`${message.name} · ${conversation.name}`, {
+      body: body.slice(0, 160),
+      icon: '/logo.svg',
+      tag: conversation.id,
+    });
+    notification.onclick = () => {
+      window.focus();
+      setActive(conversation.id);
+      notification.close();
+    };
+  } catch {
+    // Notifications are optional.
+  }
+}
+
+/* ---------- Incoming messages ---------- */
+
+function conversationFromMessage(message) {
+  if (typeof message.channel === 'string' && message.channel.startsWith('dm:')) {
+    const pair = message.channel
+      .slice(3)
+      .split(':')
+      .map((part) => {
+        try {
+          return decodeURIComponent(part);
+        } catch {
+          return '';
+        }
+      });
+    const peerId = pair.find((id) => id && id !== me.id) || message.userId;
+    const peerName =
+      peerId === message.userId
+        ? message.name
+        : users.find((user) => user.id === peerId)?.name || 'Unknown device';
+    return {
+      id: message.channel,
+      type: 'dm',
+      name: peerName,
+      peerId,
+      online: users.some((user) => user.id === peerId),
+      history: [],
+      unread: 0,
+      lastTime: message.time,
+    };
+  }
+
+  return {
+    id: message.channel || 'general',
+    type: message.channel?.startsWith('group:') ? 'group' : 'general',
+    name: message.channel?.startsWith('group:') ? 'Group' : 'General',
+    groupId: message.channel?.startsWith('group:') ? message.channel.slice(6) : undefined,
+    members: [],
+    history: [],
+    unread: 0,
+    lastTime: message.time,
+  };
+}
+
+function handleIncomingMessage(message) {
+  if (!message || !message.channel) return;
+
+  let conversation = getConversation(message.channel);
+  if (!conversation) {
+    conversation = conversationFromMessage(message);
+    conversations.push(conversation);
+  }
+
+  conversation.history = conversation.history || [];
+  const index = conversation.history.findIndex((entry) => entry.id === message.id);
+  const isNew = index < 0;
+  if (isNew) conversation.history.push(message);
+  else conversation.history[index] = { ...conversation.history[index], ...message };
+  conversation.lastTime = message.time;
+
+  if (conversation.id === activeId) {
+    if (isNew && !searchQuery && isNearBottom()) renderMessages({ scroll: true });
+    else renderMessages({ scroll: false });
+    if (!document.hidden) markSeen(conversation);
+  }
+
+  renderChannels();
+
+  if (isNew && message.userId !== me.id) {
+    const away = document.hidden || conversation.id !== activeId;
+    if (away) {
+      beep(860, 0.16, 0.06);
+      showNotification(conversation, message);
+    }
+    if (conversation.id === activeId && !isNearBottom()) {
+      jumpCount += 1;
+      updateScrollButton();
+    }
+  }
+}
+
+function handleMessageDelete(data) {
+  const conversation = getConversation(data.channel);
+  if (!conversation) return;
+  conversation.history = (conversation.history || []).filter((message) => message.id !== data.id);
+  if (conversation.id === activeId) renderMessages({ scroll: false });
+  renderChannels();
+}
+
+function applyConversations(incoming) {
+  const existing = new Map(conversations.map((conversation) => [conversation.id, conversation]));
+  const seenIds = new Set();
+  const merged = [];
+
+  for (const conversation of incoming || []) {
+    if (!conversation || !conversation.id || seenIds.has(conversation.id)) continue;
+    seenIds.add(conversation.id);
+    merged.push({
+      ...conversation,
+      history: Array.isArray(conversation.history) ? conversation.history : [],
+      unread: existing.get(conversation.id)?.unread || 0,
+    });
+  }
+
+  for (const conversation of conversations) {
+    if (conversation.type === 'dm' && !seenIds.has(conversation.id)) merged.push(conversation);
+  }
+
+  conversations = merged;
+
+  if (!getConversation(activeId) && conversations.length) {
+    activeId = conversations[0].id;
+    localStorage.setItem(CHANNEL_KEY, activeId);
+  }
+
+  renderChannels();
+  updateHeader(activeConversation());
+  renderMessages({ scroll: false });
 }
 
 /* ---------- Calls (WebRTC) ---------- */
@@ -449,7 +1137,7 @@ function newCallId() {
 }
 
 function activePeerConversation() {
-  const conversation = getConversation(activeId);
+  const conversation = activeConversation();
   if (!conversation || conversation.type !== 'dm' || !conversation.peerId) return null;
   return conversation;
 }
@@ -482,7 +1170,7 @@ function startRing() {
     if (!AudioCtx) return;
     ringCtx = ringCtx || new AudioCtx();
     if (ringCtx.state === 'suspended') ringCtx.resume();
-    const beep = () => {
+    const ring = () => {
       const osc = ringCtx.createOscillator();
       const gain = ringCtx.createGain();
       osc.frequency.value = 660;
@@ -493,8 +1181,8 @@ function startRing() {
       osc.start();
       osc.stop(ringCtx.currentTime + 0.55);
     };
-    beep();
-    ringInterval = setInterval(beep, 1600);
+    ring();
+    ringInterval = setInterval(ring, 1600);
   } catch {
     // Audio ringing is optional.
   }
@@ -607,22 +1295,14 @@ function createPeerConnection() {
 async function sendSignal(type, data) {
   if (!call) return false;
   try {
-    const response = await fetch('/api/signal', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fromId: me.id,
-        fromName: me.name,
-        toId: call.peerId,
-        callId: call.callId,
-        type,
-        data,
-      }),
+    await postJson('/api/signal', {
+      fromId: me.id,
+      fromName: me.name,
+      toId: call.peerId,
+      callId: call.callId,
+      type,
+      data,
     });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || `Server responded ${response.status}`);
-    }
     return true;
   } catch (error) {
     if (type !== 'hangup' && type !== 'decline') {
@@ -682,16 +1362,16 @@ async function startCall(withVideo) {
   const conversation = activePeerConversation();
   if (!conversation) return;
   if (call) {
-    setStatus('You are already in a call', 'offline');
+    toast('You are already in a call', 'error');
     return;
   }
   if (!navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === 'undefined') {
-    setStatus('Calls need HTTPS on this device (open via localhost or an HTTPS address)', 'offline');
+    toast('Calls need HTTPS on this device (open via localhost or an HTTPS address)', 'error');
     return;
   }
   const peer = users.find((user) => user.id === conversation.peerId);
   if (!peer) {
-    setStatus(`${conversation.name} is offline`, 'offline');
+    toast(`${conversation.name} is offline`, 'error');
     return;
   }
 
@@ -875,116 +1555,11 @@ async function handleSignal(signal) {
   if (signal.type === 'busy') return endCall('That device is already in a call', null);
 }
 
-function conversationFromMessage(message) {
-  if (typeof message.channel === 'string' && message.channel.startsWith('dm:')) {
-    const pair = message.channel
-      .slice(3)
-      .split(':')
-      .map((part) => {
-        try {
-          return decodeURIComponent(part);
-        } catch {
-          return '';
-        }
-      });
-    const peerId = pair.find((id) => id && id !== me.id) || message.userId;
-    const peerName = peerId === message.userId
-      ? message.name
-      : users.find((user) => user.id === peerId)?.name || 'Unknown device';
-    return {
-      id: message.channel,
-      type: 'dm',
-      name: peerName,
-      peerId,
-      history: [],
-      unread: 0,
-      lastTime: message.time,
-    };
-  }
-
-  return {
-    id: message.channel || 'general',
-    type: message.channel?.startsWith('group:') ? 'group' : 'general',
-    name: message.channel?.startsWith('group:') ? 'Group' : 'General',
-    groupId: message.channel?.startsWith('group:') ? message.channel.slice(6) : undefined,
-    members: [],
-    history: [],
-    unread: 0,
-    lastTime: message.time,
-  };
-}
-
-function addMessage(message) {
-  if (!message || !message.channel) return;
-
-  let conversation = getConversation(message.channel);
-  if (!conversation) {
-    conversation = conversationFromMessage(message);
-    conversations.push(conversation);
-    renderChannels();
-  }
-
-  if (!conversation.history) conversation.history = [];
-  if (conversation.history.some((entry) => entry.id === message.id)) return;
-
-  conversation.history.push(message);
-  let trimmed = false;
-  if (conversation.history.length > 200) {
-    conversation.history.splice(0, conversation.history.length - 200);
-    trimmed = true;
-  }
-  conversation.lastTime = message.time;
-
-  if (conversation.id === activeId) {
-    if (els.messages.querySelector('.empty')) els.messages.replaceChildren();
-    appendMessageRow(message);
-    if (trimmed) els.messages.querySelector('.msg')?.remove();
-    renderedId = conversation.id;
-    renderedCount = conversation.history.length;
-    renderedLastId = message.id;
-    updateHeader(conversation);
-  } else {
-    conversation.unread = (conversation.unread || 0) + 1;
-    renderChannels();
-  }
-}
-
-function applyConversations(incoming) {
-  const existing = new Map(conversations.map((conversation) => [conversation.id, conversation]));
-  const seenIds = new Set();
-  const merged = [];
-
-  for (const conversation of incoming || []) {
-    if (!conversation || !conversation.id || seenIds.has(conversation.id)) continue;
-    seenIds.add(conversation.id);
-    merged.push({
-      ...conversation,
-      history: Array.isArray(conversation.history) ? conversation.history : [],
-      unread: existing.get(conversation.id)?.unread || 0,
-    });
-  }
-
-  for (const conversation of conversations) {
-    if (conversation.type === 'dm' && !seenIds.has(conversation.id)) merged.push(conversation);
-  }
-
-  conversations = merged;
-
-  if (!getConversation(activeId) && conversations.length) {
-    activeId = conversations[0].id;
-    localStorage.setItem(CHANNEL_KEY, activeId);
-  }
-
-  renderChannels();
-  renderActiveConversation();
-}
+/* ---------- Connection ---------- */
 
 function connect() {
   if (source) source.close();
   setStatus('Connecting…', '');
-  renderedId = null;
-  renderedCount = -1;
-  renderedLastId = null;
   const params = new URLSearchParams({ id: me.id, name: me.name });
   source = new EventSource(`/events?${params}`);
 
@@ -992,7 +1567,12 @@ function connect() {
 
   source.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);
-    users = data.users;
+    if (data.config) {
+      if (data.config.maxName) MAX_NAME = data.config.maxName;
+      if (data.config.maxGroupName) MAX_GROUP_NAME = data.config.maxGroupName;
+      if (data.config.maxText) MAX_TEXT = data.config.maxText;
+    }
+    users = data.users || [];
     renderUsers();
     applyConversations(data.conversations);
   });
@@ -1001,11 +1581,57 @@ function connect() {
     applyConversations(JSON.parse(event.data).conversations);
   });
 
-  source.addEventListener('message', (event) => addMessage(JSON.parse(event.data)));
+  source.addEventListener('message', (event) => {
+    try {
+      handleIncomingMessage(JSON.parse(event.data));
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
+
+  source.addEventListener('message-delete', (event) => {
+    try {
+      handleMessageDelete(JSON.parse(event.data));
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
 
   source.addEventListener('presence', (event) => {
-    users = JSON.parse(event.data).users;
+    users = JSON.parse(event.data).users || [];
     renderUsers();
+    for (const conversation of conversations) {
+      if (conversation.type === 'dm') {
+        conversation.online = users.some((user) => user.id === conversation.peerId);
+      }
+    }
+  });
+
+  source.addEventListener('typing', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (!data || !data.channel) return;
+      if (data.users && data.users.length) typingByChannel.set(data.channel, data.users);
+      else typingByChannel.delete(data.channel);
+      const conversation = activeConversation();
+      if (conversation && conversation.id === data.channel) updateTyping(conversation);
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
+
+  source.addEventListener('read-receipt', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const conversation = getConversation(data.channel);
+      const message = conversation?.history?.find((entry) => entry.id === data.messageId);
+      if (!message) return;
+      message.readBy = message.readBy || [];
+      if (!message.readBy.includes(data.userId)) message.readBy.push(data.userId);
+      if (conversation.id === activeId) renderMessages({ scroll: false });
+    } catch {
+      // Ignore malformed payloads.
+    }
   });
 
   source.addEventListener('signal', (event) => {
@@ -1023,42 +1649,61 @@ function connect() {
   });
 }
 
+/* ---------- Composer ---------- */
+
+function autoResize() {
+  els.input.style.height = 'auto';
+  els.input.style.height = `${Math.min(els.input.scrollHeight, 180)}px`;
+}
+
 async function sendMessage() {
   if (uploadInProgress) return;
   const text = els.input.value.trim();
-  const conversation = getConversation(activeId);
+  const conversation = activeConversation();
   if (!text || !conversation) return;
 
   els.send.disabled = true;
   els.input.value = '';
   autoResize();
+  stopTyping();
+
+  const pendingReply = replyTo;
+  const editing = editingId;
 
   try {
-    const response = await fetch('/api/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: me.id, name: me.name, text, channel: conversation.id }),
-    });
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-      throw new Error(data.error || `Server responded ${response.status}`);
+    if (editing) {
+      await postJson('/api/messages/edit', {
+        id: me.id,
+        name: me.name,
+        channel: conversation.id,
+        messageId: editing,
+        text,
+      });
+      clearComposerState();
+    } else {
+      await postJson('/api/messages', {
+        id: me.id,
+        name: me.name,
+        text,
+        channel: conversation.id,
+        replyTo: pendingReply?.id || null,
+      });
+      replyTo = null;
+      updateComposerBanner();
     }
   } catch (error) {
-    // Put the text back so nothing is lost, unless the user already typed a new draft.
     if (!els.input.value) {
       els.input.value = text;
       autoResize();
     }
-    setStatus(`Send failed: ${error.message}`, 'offline');
+    if (editing) editingId = editing;
+    if (pendingReply) replyTo = pendingReply;
+    updateComposerBanner();
+    toast(error.message, 'error');
   } finally {
     els.send.disabled = false;
     els.input.focus();
   }
-}
-
-function autoResize() {
-  els.input.style.height = 'auto';
-  els.input.style.height = `${Math.min(els.input.scrollHeight, 160)}px`;
 }
 
 function uploadFile(file, conversation) {
@@ -1070,6 +1715,7 @@ function uploadFile(file, conversation) {
       filename: file.name,
       type: file.type || 'application/octet-stream',
     });
+    if (replyTo?.id) params.set('reply', replyTo.id);
 
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `/api/files?${params}`);
@@ -1093,7 +1739,6 @@ function uploadFile(file, conversation) {
   });
 }
 
-let uploadInProgress = false;
 let statusTimer = null;
 
 function restoreConnectionStatus() {
@@ -1109,16 +1754,17 @@ async function sendFiles(fileList) {
   const files = [...fileList];
   if (files.length === 0) return;
   if (uploadInProgress) {
-    setStatus('Please wait for the current transfer to finish…', 'offline');
+    toast('Please wait for the current transfer to finish…', 'error');
     return;
   }
 
-  const conversation = getConversation(activeId);
+  const conversation = activeConversation();
   if (!conversation) return;
 
   uploadInProgress = true;
   els.attach.disabled = true;
   els.send.disabled = true;
+  stopTyping();
 
   try {
     for (const file of files) {
@@ -1126,10 +1772,12 @@ async function sendFiles(fileList) {
         await uploadFile(file, conversation);
         setStatus(`Sent ${file.name}`, 'connected');
       } catch (error) {
-        setStatus(`Upload failed: ${error.message}`, 'offline');
+        toast(`Upload failed: ${error.message}`, 'error');
         break;
       }
     }
+    replyTo = null;
+    updateComposerBanner();
   } finally {
     uploadInProgress = false;
     els.attach.disabled = false;
@@ -1139,6 +1787,8 @@ async function sendFiles(fileList) {
   }
 }
 
+/* ---------- Group dialog ---------- */
+
 function openGroupDialog() {
   els.groupName.value = '';
   els.groupError.hidden = true;
@@ -1146,28 +1796,22 @@ function openGroupDialog() {
 
   const others = users.filter((user) => user.id !== me.id);
   if (others.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'member-empty';
-    li.textContent = 'No other devices are online yet. Invite someone first!';
+    const li = make('li', 'member-empty', 'No other devices are online yet. Invite someone first!');
     els.groupMembers.append(li);
   }
 
   for (const user of others) {
-    const li = document.createElement('li');
-    const label = document.createElement('label');
-    label.className = 'member';
+    const li = make('li');
+    const label = make('label', 'member');
 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
     checkbox.value = user.id;
 
-    const avatar = document.createElement('div');
-    avatar.className = 'avatar';
-    avatar.textContent = initials(user.name);
+    const avatar = make('div', 'avatar', initials(user.name));
     avatar.style.background = avatarColor(user.name);
 
-    const name = document.createElement('span');
-    name.textContent = user.name;
+    const name = make('span', null, user.name);
 
     label.append(checkbox, avatar, name);
     li.append(label);
@@ -1183,7 +1827,8 @@ async function createGroup(event) {
   const nameValue = els.groupName.value.trim().slice(0, MAX_GROUP_NAME);
   const members = [...els.groupMembers.querySelectorAll('input:checked')].map((input) => input.value);
   if (!nameValue || members.length === 0) {
-    els.groupError.textContent = members.length === 0 ? 'Pick at least one person to join the group.' : 'Give the group a name.';
+    els.groupError.textContent =
+      members.length === 0 ? 'Pick at least one person to join the group.' : 'Give the group a name.';
     els.groupError.hidden = false;
     return;
   }
@@ -1193,14 +1838,7 @@ async function createGroup(event) {
   submit.disabled = true;
 
   try {
-    const response = await fetch('/api/groups', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: me.id, name: me.name, nameValue, members }),
-    });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Server responded ${response.status}`);
-
+    const data = await postJson('/api/groups', { id: me.id, name: me.name, nameValue, members });
     els.groupDialog.hidden = true;
 
     if (!getConversation(data.group.channel)) {
@@ -1222,11 +1860,69 @@ async function createGroup(event) {
 
     setActive(data.group.channel);
   } catch (error) {
-    setStatus(`Could not create group: ${error.message}`, 'offline');
+    toast(`Could not create group: ${error.message}`, 'error');
   } finally {
     submit.disabled = false;
   }
 }
+
+/* ---------- Search / theme / settings ---------- */
+
+function openSearch() {
+  els.searchbar.hidden = false;
+  els.searchInput.focus();
+  els.searchInput.select();
+}
+
+function closeSearch() {
+  if (els.searchbar.hidden) return;
+  els.searchbar.hidden = true;
+  els.searchInput.value = '';
+  els.searchCount.textContent = '';
+  searchQuery = '';
+  renderMessages({ scroll: false });
+}
+
+function applyTheme(theme) {
+  settings.theme = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = settings.theme;
+  localStorage.setItem(THEME_KEY, settings.theme);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', settings.theme === 'light' ? '#f4f6fb' : '#0a0c12');
+}
+
+function syncSettingButtons() {
+  els.toggleSound.classList.toggle('active', settings.sound);
+  els.toggleSound.setAttribute('aria-pressed', String(settings.sound));
+  els.toggleNotify.classList.toggle('active', settings.notify);
+  els.toggleNotify.setAttribute('aria-pressed', String(settings.notify));
+}
+
+async function toggleNotifications() {
+  if (settings.notify) {
+    settings.notify = false;
+    localStorage.setItem(NOTIFY_KEY, '0');
+    syncSettingButtons();
+    toast('Desktop alerts off');
+    return;
+  }
+  if (!('Notification' in window)) {
+    toast('This browser does not support notifications', 'error');
+    return;
+  }
+  let permission = Notification.permission;
+  if (permission === 'default') permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    toast('Notification permission was blocked', 'error');
+    return;
+  }
+  settings.notify = true;
+  localStorage.setItem(NOTIFY_KEY, '1');
+  syncSettingButtons();
+  toast('Desktop alerts on');
+}
+
+/* ---------- Wiring ---------- */
 
 els.composer.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -1271,10 +1967,68 @@ els.input.addEventListener('keydown', (event) => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     sendMessage();
+  } else if (event.key === 'Escape' && (replyTo || editingId)) {
+    const wasEditing = Boolean(editingId);
+    clearComposerState();
+    if (wasEditing) {
+      els.input.value = '';
+      autoResize();
+    }
   }
 });
 
-els.input.addEventListener('input', autoResize);
+els.input.addEventListener('input', () => {
+  autoResize();
+  noteTyping();
+});
+
+els.input.addEventListener('blur', stopTyping);
+
+els.bannerCancel.addEventListener('click', () => {
+  clearComposerState();
+  els.input.value = '';
+  autoResize();
+  els.input.focus();
+});
+
+els.messages.addEventListener('scroll', () => {
+  updateScrollButton();
+  if (isNearBottom()) {
+    jumpCount = 0;
+    updateJumpBadge();
+  }
+});
+
+els.scrollBottom.addEventListener('click', () => {
+  scrollToBottom();
+  const conversation = activeConversation();
+  if (conversation) markSeen(conversation);
+});
+
+els.toggleSearch.addEventListener('click', () => {
+  if (els.searchbar.hidden) openSearch();
+  else closeSearch();
+});
+
+els.searchInput.addEventListener('input', () => {
+  searchQuery = els.searchInput.value;
+  renderMessages({ scroll: false });
+});
+
+els.searchClose.addEventListener('click', closeSearch);
+
+els.toggleTheme.addEventListener('click', () => {
+  applyTheme(settings.theme === 'light' ? 'dark' : 'light');
+});
+
+els.toggleSound.addEventListener('click', () => {
+  settings.sound = !settings.sound;
+  localStorage.setItem(SOUND_KEY, settings.sound ? '1' : '0');
+  syncSettingButtons();
+  if (settings.sound) beep(720, 0.12, 0.05);
+});
+
+els.toggleNotify.addEventListener('click', toggleNotifications);
 
 function askForName(firstTime) {
   els.nameInput.value = firstTime ? '' : me.name;
@@ -1297,14 +2051,15 @@ els.nameForm.addEventListener('submit', (event) => {
 els.changeName.addEventListener('click', () => askForName(false));
 
 els.copyLink.addEventListener('click', async () => {
+  const label = els.copyLink.querySelector('.label');
   try {
     await navigator.clipboard.writeText(location.origin);
-    els.copyLink.textContent = 'Copied!';
+    if (label) label.textContent = 'Copied!';
   } catch {
-    els.copyLink.textContent = location.host;
+    if (label) label.textContent = location.host;
   }
   setTimeout(() => {
-    els.copyLink.textContent = 'Copy link';
+    if (label) label.textContent = 'Invite';
   }, 1600);
 });
 
@@ -1315,9 +2070,13 @@ els.toggleMenu.addEventListener('click', () => {
 });
 
 els.toggleMembers.addEventListener('click', () => {
-  const open = !els.app.classList.contains('members-open');
-  els.app.classList.remove('sidebar-open');
-  els.app.classList.toggle('members-open', open);
+  if (window.matchMedia('(max-width: 820px)').matches) {
+    const open = !els.app.classList.contains('members-open');
+    els.app.classList.remove('sidebar-open');
+    els.app.classList.toggle('members-open', open);
+  } else {
+    els.app.classList.toggle('members-collapsed');
+  }
 });
 
 els.scrim.addEventListener('click', () => els.app.classList.remove('sidebar-open', 'members-open'));
@@ -1331,6 +2090,7 @@ els.callMute.addEventListener('click', toggleMute);
 
 window.addEventListener('pagehide', () => {
   if (call) sendSignalBeacon(call, 'hangup');
+  stopTyping();
 });
 
 els.newGroup.addEventListener('click', openGroupDialog);
@@ -1342,16 +2102,40 @@ els.groupDialog.addEventListener('click', (event) => {
   if (event.target === els.groupDialog) els.groupDialog.hidden = true;
 });
 
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !els.groupDialog.hidden) els.groupDialog.hidden = true;
+document.addEventListener('click', (event) => {
+  if (event.target.closest('.reaction-picker')) return;
+  document.querySelectorAll('.reaction-picker').forEach((picker) => picker.remove());
 });
 
+document.addEventListener('visibilitychange', () => {
+  const conversation = activeConversation();
+  if (!document.hidden && conversation) {
+    markSeen(conversation);
+    renderChannels();
+    renderMessages({ scroll: false });
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    if (!els.groupDialog.hidden) els.groupDialog.hidden = true;
+    else if (els.nameDialog.hidden && !els.searchbar.hidden) closeSearch();
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f' && els.nameDialog.hidden) {
+    event.preventDefault();
+    openSearch();
+  }
+});
+
+applyTheme(settings.theme);
+syncSettingButtons();
 renderChannels();
 
 if (me.name) {
   els.meName.textContent = me.name;
   els.nameDialog.hidden = true;
-  showEmptyState(getConversation(activeId));
+  updateHeader(activeConversation());
+  renderMessages({ scroll: false });
   connect();
 } else {
   askForName(true);

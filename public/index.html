@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
@@ -39,7 +39,17 @@
             </button>
             <button type="button" id="copy-link" class="ghost">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15l6-6M8 12l-2 2a3 3 0 0 0 4 4l2-2M16 12l2-2a3 3 0 0 0-4-4l-2 2" /></svg>
-              Invite
+              <span class="label">Invite</span>
+            </button>
+          </div>
+          <div class="sidebar-toggles">
+            <button type="button" id="toggle-sound" class="toggle-chip" aria-pressed="true" title="Message sounds">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" /></svg>
+              Sound
+            </button>
+            <button type="button" id="toggle-notify" class="toggle-chip" aria-pressed="false" title="Desktop notifications">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8M10 20a2 2 0 0 0 4 0" /></svg>
+              Alerts
             </button>
           </div>
         </div>
@@ -57,23 +67,56 @@
               <div class="sub" id="subtitle">No messages yet</div>
             </div>
           </div>
-          <div class="net-pill"><span class="live-dot"></span>LAN</div>
-          <div class="call-buttons" id="call-buttons" hidden>
-            <button type="button" id="call-audio" class="call-btn" title="Start an audio call" aria-label="Start an audio call">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.24c1.1.36 2.3.56 3.6.56a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.3.2 2.5.56 3.6a1 1 0 0 1-.24 1l-2.2 2.2Z" /></svg>
+          <div class="topbar-actions">
+            <div class="call-buttons" id="call-buttons" hidden>
+              <button type="button" id="call-audio" class="icon" title="Start an audio call" aria-label="Start an audio call">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.6 10.8a15 15 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.24c1.1.36 2.3.56 3.6.56a1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.3.2 2.5.56 3.6a1 1 0 0 1-.24 1l-2.2 2.2Z" /></svg>
+              </button>
+              <button type="button" id="call-video" class="icon" title="Start a video call" aria-label="Start a video call">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2.5" /><path d="m15 10 5-3v10l-5-3" /></svg>
+              </button>
+            </div>
+            <button type="button" id="toggle-search" class="icon" aria-label="Search messages" title="Search messages">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4-4" /></svg>
             </button>
-            <button type="button" id="call-video" class="call-btn" title="Start a video call" aria-label="Start a video call">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="12" height="12" rx="2.5" /><path d="m15 10 5-3v10l-5-3" /></svg>
+            <button type="button" id="toggle-theme" class="icon" aria-label="Toggle theme" title="Toggle light/dark theme">
+              <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z" /></svg>
+              <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19" /></svg>
+            </button>
+            <button type="button" id="toggle-members" class="icon" aria-label="Toggle online devices" title="Online devices">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 7.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M17 11a3 3 0 1 0-2-5.2M21 19v-1a4 4 0 0 0-3-3.8" /></svg>
             </button>
           </div>
-          <button type="button" id="toggle-members" class="icon" aria-label="Toggle online devices">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v1M9.5 7.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5M17 11a3 3 0 1 0-2-5.2M21 19v-1a4 4 0 0 0-3-3.8" /></svg>
-          </button>
         </header>
 
-        <div id="messages" class="messages" aria-live="polite"></div>
+        <div class="searchbar" id="searchbar" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4-4" /></svg>
+          <input id="search-input" type="search" placeholder="Search this conversation…" autocomplete="off" />
+          <span class="search-count" id="search-count"></span>
+          <button type="button" id="search-close" class="icon tiny" aria-label="Close search">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
+        </div>
+
+        <div class="messages-wrap">
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <button type="button" id="scroll-bottom" class="scroll-bottom" hidden aria-label="Scroll to latest messages">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
+            <span class="jump-badge" id="jump-badge" hidden></span>
+          </button>
+        </div>
 
         <form id="composer" class="composer">
+          <div class="composer-banner" id="composer-banner" hidden>
+            <div class="banner-icon" id="banner-icon"></div>
+            <div class="banner-body">
+              <strong id="banner-title"></strong>
+              <span id="banner-text"></span>
+            </div>
+            <button type="button" id="banner-cancel" class="icon tiny" aria-label="Cancel">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+            </button>
+          </div>
           <div class="input-shell">
             <button type="button" id="attach" class="attach" aria-label="Attach files" title="Send files">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7-7" /></svg>
@@ -83,7 +126,7 @@
               id="input"
               rows="1"
               placeholder="Message the room…"
-              maxlength="2000"
+              maxlength="4000"
               autocomplete="off"
               enterkeyhint="send"
             ></textarea>
@@ -148,6 +191,8 @@
         </div>
       </form>
     </div>
+
+    <div id="toast" class="toast" hidden></div>
 
     <script src="/app.js" type="module"></script>
   </body>
