@@ -226,8 +226,11 @@
       <form id="name-form" class="card" role="dialog" aria-modal="true" aria-labelledby="name-title">
         <img class="card-mark" src="/logo.svg" alt="" width="56" height="56" />
         <h1 id="name-title">Welcome to Chatterbox</h1>
-        <p>Pick the name the other devices on this network will see.</p>
-        <input id="name-input" maxlength="24" placeholder="Your name" autocomplete="nickname" required />
+        <p>Set your nickname and optional full name. Your IP address and device are shared publicly as credentials.</p>
+        <label class="field-label" for="name-input">Nickname / username</label>
+        <input id="name-input" maxlength="24" placeholder="Nickname" autocomplete="nickname" required />
+        <label class="field-label" for="full-name-input">Full name (optional)</label>
+        <input id="full-name-input" maxlength="60" placeholder="Full name" autocomplete="name" />
         <button type="submit">Start chatting</button>
       </form>
     </div>

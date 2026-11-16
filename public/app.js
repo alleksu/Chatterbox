@@ -1,5 +1,6 @@
 const ID_KEY = 'lanchat.id';
 const NAME_KEY = 'lanchat.name';
+const FULL_NAME_KEY = 'lanchat.fullName';
 const CHANNEL_KEY = 'lanchat.channel';
 const SEEN_KEY = 'lanchat.seen';
 const THEME_KEY = 'lanchat.theme';
@@ -30,6 +31,7 @@ function apiUrl(path) {
 }
 
 let MAX_NAME = 24;
+let MAX_FULL_NAME = 60;
 let MAX_GROUP_NAME = 40;
 let MAX_TEXT = 4000;
 
@@ -65,6 +67,7 @@ const els = {
   nameDialog: document.getElementById('name-dialog'),
   nameForm: document.getElementById('name-form'),
   nameInput: document.getElementById('name-input'),
+  fullNameInput: document.getElementById('full-name-input'),
   changeName: document.getElementById('change-name'),
   copyLink: document.getElementById('copy-link'),
   toggleMenu: document.getElementById('toggle-menu'),
@@ -175,7 +178,11 @@ function loadDrafts() {
   }
 }
 
-const me = { id: getDeviceId(), name: localStorage.getItem(NAME_KEY) || '' };
+const me = {
+  id: getDeviceId(),
+  name: localStorage.getItem(NAME_KEY) || '',
+  fullName: localStorage.getItem(FULL_NAME_KEY) || '',
+};
 const settings = {
   theme: localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark',
   sound: localStorage.getItem(SOUND_KEY) !== '0',
@@ -491,18 +498,27 @@ function updateTitle() {
 
 /* ---------- Header ---------- */
 
+function formatProfile(user) {
+  if (!user) return '';
+  const fullName = user.fullName || user.peerFullName || '';
+  const creds = user.credentials || user.peerCredentials || '';
+  return [fullName, creds].filter(Boolean).join(' | ');
+}
+
 function baseSubtitle(conversation) {
   if (!conversation) return 'No messages yet';
   if (conversation.type === 'dm') {
-    const peer = users.find((user) => user.id === conversation.peerId);
-    return peer ? 'Online now' : 'Offline';
+    const peer = users.find((user) => user.id === conversation.peerId) || {};
+    const status = peer.id ? 'Online now' : 'Offline';
+    const details = formatProfile({ fullName: peer.fullName || conversation.peerFullName, credentials: peer.credentials || conversation.peerCredentials });
+    return details ? status + ' | ' + details : status;
   }
   if (conversation.type === 'group') {
-    return `${conversation.members?.length || 0} member${conversation.members?.length === 1 ? '' : 's'}`;
+    return (conversation.members?.length || 0) + ' member' + (conversation.members?.length === 1 ? '' : 's');
   }
   const online = users.length;
   const scope = conversation.type === 'room' ? 'public room' : 'room';
-  return `${online} online · ${conversation.history?.length || 0} message${conversation.history?.length === 1 ? '' : 's'} · ${scope}`;
+  return online + ' online | ' + (conversation.history?.length || 0) + ' message' + (conversation.history?.length === 1 ? '' : 's') + ' | ' + scope;
 }
 
 function updateHeader(conversation) {
@@ -710,7 +726,13 @@ function buildMessageRow(message, conversation, previous) {
 
   if (!grouped) {
     const head = make('div', 'msg-head');
-    const name = make('span', 'name', mine ? `${message.name} (you)` : message.name);
+    let displayName = mine ? message.name + ' (you)' : message.name;
+    if (conversation.type === 'dm' && !mine) {
+      const peer = users.find((user) => user.id === message.userId) || {};
+      const fullName = peer.fullName || conversation.peerFullName || '';
+      if (fullName) displayName += ' (' + fullName + ')';
+    }
+    const name = make('span', 'name', displayName);
     const time = make('span', 'msg-time', formatTime(message.time));
     head.append(name, time);
     body.append(head);
@@ -1063,11 +1085,15 @@ function renderUsers() {
     const avatar = make('div', 'avatar', initials(user.name));
     avatar.style.background = avatarColor(user.name);
 
-    const label = make('span', 'user-name', user.name);
+    const info = make('div', 'user-info');
+    info.append(make('span', 'user-name', user.name));
+    const metaText = formatProfile(user);
+    if (metaText) info.append(make('span', 'user-meta', metaText));
+
     const dot = make('span', 'presence-dot');
     dot.title = 'Online';
 
-    li.append(avatar, label, dot);
+    li.append(avatar, info, dot);
 
     if (user.id === me.id) {
       li.append(make('span', 'you', 'you'));
@@ -1107,17 +1133,24 @@ function setActive(id) {
 function openDm(peer) {
   if (!peer || peer.id === me.id) return;
   const id = dmChannelId(me.id, peer.id);
-  if (!getConversation(id)) {
+  const existing = getConversation(id);
+  if (!existing) {
     conversations.push({
       id,
       type: 'dm',
       name: peer.name,
       peerId: peer.id,
+      peerFullName: peer.fullName || '',
+      peerCredentials: peer.credentials || '',
       online: true,
       history: [],
       unread: 0,
       lastTime: Date.now(),
     });
+  } else {
+    existing.name = peer.name;
+    existing.peerFullName = peer.fullName || existing.peerFullName || '';
+    existing.peerCredentials = peer.credentials || existing.peerCredentials || '';
   }
   setActive(id);
 }
@@ -1473,11 +1506,14 @@ function conversationFromMessage(message) {
       peerId === message.userId
         ? message.name
         : users.find((user) => user.id === peerId)?.name || 'Unknown device';
+    const peer = users.find((user) => user.id === peerId) || {};
     return {
       id: message.channel,
       type: 'dm',
-      name: peerName,
+      name: peer.name || peerName,
       peerId,
+      peerFullName: peer.fullName || '',
+      peerCredentials: peer.credentials || '',
       online: users.some((user) => user.id === peerId),
       history: [],
       unread: 0,
@@ -2159,8 +2195,9 @@ async function handleSignal(signal) {
 
 function connect() {
   if (source) source.close();
-  setStatus('Connecting…', '');
+  setStatus('Connecting.', '');
   const params = new URLSearchParams({ id: me.id, name: me.name });
+  if (me.fullName) params.set('fullName', me.fullName);
   source = new EventSource(apiUrl(`/events?${params}`));
 
   source.addEventListener('open', () => setStatus(`Connected · ${location.host}`, 'connected'));
@@ -2169,6 +2206,7 @@ function connect() {
     const data = JSON.parse(event.data);
     if (data.config) {
       if (data.config.maxName) MAX_NAME = data.config.maxName;
+      if (data.config.maxFullName) MAX_FULL_NAME = data.config.maxFullName;
       if (data.config.maxGroupName) MAX_GROUP_NAME = data.config.maxGroupName;
       if (data.config.maxText) MAX_TEXT = data.config.maxText;
     }
@@ -2407,22 +2445,59 @@ function renderUploads() {
   }
 
   els.uploadPanel.hidden = false;
+
+  const pending = uploads.filter((item) => item.status === 'pending');
+  if (pending.length > 1) {
+    const bar = make('div', 'upload-bulk');
+    bar.append(make('span', 'upload-bulk-label', pending.length + ' files ready to send'));
+    const sendAll = make('button', 'upload-send', 'Send all');
+    sendAll.type = 'button';
+    sendAll.addEventListener('click', sendAllPending);
+    const deleteAll = make('button', 'upload-cancel', 'Delete all');
+    deleteAll.type = 'button';
+    deleteAll.addEventListener('click', deleteAllPending);
+    const actions = make('div', 'upload-actions');
+    actions.append(sendAll, deleteAll);
+    bar.append(actions);
+    els.uploadPanel.append(bar);
+  }
+
   for (const item of uploads) {
-    const row = make('div', `upload-item ${item.status}`);
+    const row = make('div', 'upload-item ' + item.status);
     const head = make('div', 'upload-head');
+    let statusText = item.percent + '%';
+    if (item.status === 'pending') statusText = 'Ready';
+    else if (item.status === 'done') statusText = 'Sent';
+    else if (item.status === 'failed') statusText = 'Failed';
+    else if (item.status === 'cancelled') statusText = 'Cancelled';
     head.append(
       make('span', 'upload-name', item.file.name),
-      make('span', 'upload-percent', item.status === 'done' ? 'Sent' : `${item.percent}%`),
+      make('span', 'upload-percent', statusText),
     );
+
     const track = make('div', 'upload-track');
     const bar = make('div', 'upload-bar');
-    bar.style.width = `${item.status === 'done' ? 100 : item.percent}%`;
+    const width = item.status === 'pending' ? 0 : item.status === 'done' ? 100 : item.percent;
+    bar.style.width = width + '%';
     track.append(bar);
-    const cancel = make('button', 'upload-cancel', item.status === 'done' ? 'Done' : 'Cancel');
-    cancel.type = 'button';
-    cancel.disabled = item.status === 'done' || item.status === 'cancelled';
-    cancel.addEventListener('click', () => cancelUpload(item));
-    row.append(head, track, cancel);
+
+    const actions = make('div', 'upload-actions');
+    if (item.status === 'pending' || item.status === 'failed') {
+      const send = make('button', 'upload-send', item.status === 'failed' ? 'Retry' : 'Send');
+      send.type = 'button';
+      send.addEventListener('click', () => sendPendingItem(item));
+      const remove = make('button', 'upload-cancel', 'Delete');
+      remove.type = 'button';
+      remove.addEventListener('click', () => deleteUpload(item));
+      actions.append(send, remove);
+    } else if (item.status === 'uploading') {
+      const cancel = make('button', 'upload-cancel', 'Cancel');
+      cancel.type = 'button';
+      cancel.addEventListener('click', () => cancelUpload(item));
+      actions.append(cancel);
+    }
+
+    row.append(head, track, actions);
     els.uploadPanel.append(row);
   }
 }
@@ -2430,6 +2505,27 @@ function renderUploads() {
 function removeUpload(item) {
   uploads = uploads.filter((entry) => entry !== item);
   renderUploads();
+}
+
+function deleteUpload(item) {
+  if (!item) return;
+  if (item.status === 'uploading' && item.xhr) {
+    try {
+      item.xhr.abort();
+    } catch {
+      // The request may already be finished.
+    }
+  }
+  removeUpload(item);
+  toast('Removed ' + item.file.name);
+}
+
+function deleteAllPending() {
+  for (const item of uploads.filter((entry) => entry.status === 'pending')) {
+    uploads = uploads.filter((entry) => entry !== item);
+  }
+  renderUploads();
+  toast('Removed pending files');
 }
 
 function cancelUpload(item) {
@@ -2444,13 +2540,13 @@ function cancelUpload(item) {
     }
   }
   renderUploads();
-  toast(`Cancelled ${item.file.name}`);
+  toast('Cancelled ' + item.file.name);
   setTimeout(() => removeUpload(item), 1200);
 }
 
 function uploadFile(item, conversation, pendingReply) {
   return new Promise((resolve, reject) => {
-    const { file } = item;
+    const file = item.file;
     const params = new URLSearchParams({
       id: me.id,
       name: me.name,
@@ -2462,7 +2558,7 @@ function uploadFile(item, conversation, pendingReply) {
 
     const xhr = new XMLHttpRequest();
     item.xhr = xhr;
-    xhr.open('POST', apiUrl(`/api/files?${params}`));
+    xhr.open('POST', apiUrl('/api/files?' + params));
     xhr.responseType = 'json';
 
     xhr.upload.addEventListener('progress', (event) => {
@@ -2476,7 +2572,7 @@ function uploadFile(item, conversation, pendingReply) {
       item.xhr = null;
       const data = xhr.response || {};
       if (xhr.status >= 200 && xhr.status < 300 && data.ok) resolve(data);
-      else reject(new Error(data.error || `Server responded ${xhr.status}`));
+      else reject(new Error(data.error || 'Server responded ' + xhr.status));
     });
     xhr.addEventListener('error', () => {
       item.xhr = null;
@@ -2499,69 +2595,86 @@ function restoreConnectionStatus() {
   if (statusTimer) clearTimeout(statusTimer);
   statusTimer = setTimeout(() => {
     if (source && source.readyState === EventSource.OPEN) {
-      setStatus(`Connected · ${location.host}`, 'connected');
+      setStatus('Connected | ' + location.host, 'connected');
     }
   }, 2500);
 }
 
-async function sendFiles(fileList) {
-  const files = [...fileList];
-  if (files.length === 0) return;
+async function sendPendingItem(item) {
+  if (!item || (item.status !== 'pending' && item.status !== 'failed')) return;
   if (uploadInProgress) {
-    toast('Please wait for the current transfer to finish…', 'error');
+    toast('Please wait for the current transfer to finish.', 'error');
+    return;
+  }
+  const conversation = getConversation(item.channel) || activeConversation();
+  if (!conversation) {
+    toast('Open a conversation to send this file.', 'error');
     return;
   }
 
-  const conversation = activeConversation();
-  if (!conversation) return;
-  const targetId = conversation.id;
-  const pendingReply = replyTo;
-
-  const items = files.map((file) => ({
-    file,
-    percent: 0,
-    status: 'queued',
-    cancelled: false,
-    xhr: null,
-  }));
-  uploads.push(...items);
+  item.cancelled = false;
+  item.status = 'uploading';
+  item.percent = 0;
   renderUploads();
 
   uploadInProgress = true;
   els.attach.disabled = true;
-  els.send.disabled = true;
   stopTyping();
-  let sentAny = false;
-
   try {
-    for (const item of items) {
-      if (item.cancelled) continue;
-      try {
-        await uploadFile(item, conversation, pendingReply);
-        sentAny = true;
-        item.status = 'done';
-        item.percent = 100;
-        renderUploads();
-        setTimeout(() => removeUpload(item), 1600);
-      } catch (error) {
-        if (error.cancelled || item.cancelled) continue;
-        item.status = 'failed';
-        renderUploads();
-        toast(`Upload failed: ${error.message}`, 'error');
-        break;
-      }
-    }
-    if (sentAny && activeId === targetId && pendingReply && replyTo?.id === pendingReply.id) {
+    await uploadFile(item, conversation, item.reply);
+    item.status = 'done';
+    item.percent = 100;
+    renderUploads();
+    setTimeout(() => removeUpload(item), 1600);
+    if (activeId === item.channel && item.reply && replyTo?.id === item.reply.id) {
       replyTo = null;
       updateComposerBanner();
+    }
+  } catch (error) {
+    if (error.cancelled || item.cancelled) {
+      removeUpload(item);
+    } else {
+      item.status = 'failed';
+      renderUploads();
+      toast('Upload failed: ' + error.message, 'error');
     }
   } finally {
     uploadInProgress = false;
     els.attach.disabled = false;
     els.send.disabled = false;
-    if (activeId === targetId) els.input.focus();
     restoreConnectionStatus();
+    if (activeId === item.channel) els.input.focus();
   }
+}
+
+async function sendAllPending() {
+  for (const item of uploads.filter((entry) => entry.status === 'pending')) {
+    if (item.status !== 'pending') continue;
+    await sendPendingItem(item);
+  }
+}
+
+function sendFiles(fileList) {
+  const files = [...fileList];
+  if (files.length === 0) return;
+
+  const conversation = activeConversation();
+  if (!conversation) return;
+
+  const pendingReply = replyTo ? { id: replyTo.id, name: replyTo.name, text: replyTo.text } : null;
+  const items = files.map((file) => ({
+    file,
+    percent: 0,
+    status: 'pending',
+    cancelled: false,
+    xhr: null,
+    channel: conversation.id,
+    reply: pendingReply,
+  }));
+  uploads.push(...items);
+  renderUploads();
+  els.uploadPanel.scrollIntoView({ block: 'nearest' });
+  toast(items.length === 1 ? 'Review the file, then send or delete it.' : 'Review the files, then send or delete them.');
 }
 
 /* ---------- Group dialog ---------- */
@@ -3118,6 +3231,9 @@ els.toggleNotify.addEventListener('click', toggleNotifications);
 
 function askForName(firstTime) {
   els.nameInput.value = firstTime ? '' : me.name;
+  els.fullNameInput.value = firstTime ? '' : (me.fullName || '');
+  els.nameInput.maxLength = MAX_NAME;
+  els.fullNameInput.maxLength = MAX_FULL_NAME;
   openDialog(els.nameDialog, els.nameInput);
   els.nameInput.select();
 }
@@ -3125,9 +3241,13 @@ function askForName(firstTime) {
 els.nameForm.addEventListener('submit', (event) => {
   event.preventDefault();
   const name = els.nameInput.value.trim().slice(0, MAX_NAME);
+  const fullName = els.fullNameInput.value.trim().slice(0, MAX_FULL_NAME);
   if (!name) return;
   me.name = name;
+  me.fullName = fullName;
   localStorage.setItem(NAME_KEY, name);
+  if (fullName) localStorage.setItem(FULL_NAME_KEY, fullName);
+  else localStorage.removeItem(FULL_NAME_KEY);
   els.meName.textContent = name;
   closeDialog(els.nameDialog);
   connect();

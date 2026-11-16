@@ -11,6 +11,8 @@ const HOST = '0.0.0.0';
 const MAX_HISTORY = 300;
 const MAX_TEXT = 4000;
 const MAX_NAME = 24;
+const MAX_FULL_NAME = 60;
+const MAX_DEVICE = 180;
 const MAX_GROUP_NAME = 40;
 const MAX_GROUP_MEMBERS = 64;
 const MAX_BODY = 32 * 1024;
@@ -93,21 +95,75 @@ function setCors(res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
 }
 
-function rememberUser(userId, name) {
+function summarizeDevice(ua) {
+  const value = cleanText(ua, 240);
+  if (!value) return 'Unknown device';
+  let os = 'Unknown OS';
+  if (/Windows/i.test(value)) os = 'Windows';
+  else if (/Android/i.test(value)) os = 'Android';
+  else if (/iPhone|iPad|iPod/i.test(value)) os = 'iOS';
+  else if (/Mac OS X|Macintosh/i.test(value)) os = 'macOS';
+  else if (/Linux/i.test(value)) os = 'Linux';
+
+  let browser = 'Browser';
+  if (/Edg\//.test(value)) browser = 'Edge';
+  else if (/OPR\//.test(value) || /Opera/.test(value)) browser = 'Opera';
+  else if (/Chrome\//.test(value) && !/Edg\//.test(value)) browser = 'Chrome';
+  else if (/Firefox\//.test(value)) browser = 'Firefox';
+  else if (/Safari\//.test(value) && !/Chrome\//.test(value)) browser = 'Safari';
+
+  return cleanText(`${browser} on ${os}`, MAX_DEVICE);
+}
+
+function clientIp(req) {
+  const forwarded = typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : '';
+  const raw = forwarded.split(',')[0].trim() || req.socket?.remoteAddress || '';
+  const value = raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+  return cleanText(value || 'Unknown IP', 80);
+}
+
+function buildCredentials(ip, device) {
+  return cleanText(`${ip || 'Unknown IP'} | ${device || 'Unknown device'}`, 180);
+}
+
+function rememberUser(userId, profile = {}) {
   if (!userId) return;
-  knownUsers.set(userId, name || knownUsers.get(userId) || 'Anonymous');
+  const prev = knownUsers.get(userId) || {};
+  const next = typeof profile === 'string' ? { name: profile } : (profile || {});
+  const name = cleanText(next.name, MAX_NAME) || prev.name || 'Anonymous';
+  const fullName = cleanText(next.fullName, MAX_FULL_NAME) || prev.fullName || '';
+  const ip = cleanText(next.ip, 80) || prev.ip || '';
+  const device = cleanText(next.device, MAX_DEVICE) || prev.device || '';
+  const credentials = cleanText(next.credentials, 180) || prev.credentials || buildCredentials(ip, device);
+  knownUsers.set(userId, { name, fullName, ip, device, credentials });
+}
+
+function userProfile(userId) {
+  return knownUsers.get(userId) || {
+    name: 'Unknown device',
+    fullName: '',
+    ip: '',
+    device: '',
+    credentials: '',
+  };
 }
 
 function userName(userId) {
-  return knownUsers.get(userId) || 'Unknown device';
+  return userProfile(userId).name || 'Unknown device';
 }
 
 function onlineUsers() {
   const seen = new Map();
-  for (const client of clients.values()) seen.set(client.userId, client.name);
-  return [...seen.entries()]
-    .map(([id, name]) => ({ id, name }))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  for (const client of clients.values()) {
+    const profile = userProfile(client.userId);
+    seen.set(client.userId, {
+      id: client.userId,
+      name: profile.name || client.name || 'Anonymous',
+      fullName: profile.fullName || '',
+      credentials: profile.credentials || buildCredentials(profile.ip, profile.device),
+    });
+  }
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function broadcast(event, data) {
@@ -231,11 +287,14 @@ function conversationsFor(userId) {
     const info = parseChannel(key);
     if (!info || info.type !== 'dm' || !info.users.includes(userId)) continue;
     const peerId = info.users[0] === userId ? info.users[1] : info.users[0];
+    const peer = userProfile(peerId);
     list.push({
       id: key,
       type: 'dm',
-      name: userName(peerId),
+      name: peer.name || userName(peerId),
       peerId,
+      peerFullName: peer.fullName || '',
+      peerCredentials: peer.credentials || '',
       online: [...clients.values()].some((client) => client.userId === peerId),
       history: messages,
       lastTime: lastMessageTime(messages),
@@ -424,7 +483,7 @@ async function handleFileUpload(req, res) {
     return send(res, 413, { error: `File is larger than ${MAX_FILE_MB} MB` });
   }
 
-  rememberUser(userId, senderName);
+  rememberUser(userId, { name: senderName });
 
   const fileId = randomUUID();
   const filePath = path.join(filesDir, fileId);
@@ -519,7 +578,11 @@ function handleEvents(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const userId = cleanText(url.searchParams.get('id'), 64) || `anon-${nextConnectionId}`;
   const name = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
-  rememberUser(userId, name);
+  const fullName = cleanText(url.searchParams.get('fullName'), MAX_FULL_NAME);
+  const ip = clientIp(req);
+  const device = summarizeDevice(req.headers['user-agent']);
+  const credentials = buildCredentials(ip, device);
+  rememberUser(userId, { name, fullName, ip, device, credentials });
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
@@ -531,13 +594,13 @@ function handleEvents(req, res) {
   res.write('retry: 2000\n\n');
 
   const connectionId = nextConnectionId++;
-  clients.set(connectionId, { res, userId, name });
+  clients.set(connectionId, { res, userId, name, fullName, ip, device, credentials });
   const init = {
     conversations: conversationsFor(userId),
     users: onlineUsers(),
     mentions: mentionsFor(userId),
     calls: callsFor(userId),
-    config: { maxFileMB: MAX_FILE_MB, maxText: MAX_TEXT, maxName: MAX_NAME, maxGroupName: MAX_GROUP_NAME },
+    config: { maxFileMB: MAX_FILE_MB, maxText: MAX_TEXT, maxName: MAX_NAME, maxFullName: MAX_FULL_NAME, maxGroupName: MAX_GROUP_NAME },
   };
   res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
   broadcast('presence', { users: onlineUsers() });
@@ -645,7 +708,7 @@ async function handleSend(req, res) {
   if (!info) return send(res, 400, { error: 'Unknown conversation' });
   if (!canAccess(info, userId)) return send(res, 403, { error: 'You are not part of this conversation' });
 
-  rememberUser(userId, name);
+  rememberUser(userId, { name });
 
   const message = {
     id: messageId(),
@@ -683,7 +746,7 @@ async function handleEdit(req, res) {
   message.text = text;
   message.editedAt = Date.now();
   message.mentions = normalizeMentions(info, body.mentions, userId);
-  rememberUser(userId, message.name);
+  rememberUser(userId, { name: message.name });
   deliverToChannel(info, 'message', message);
   send(res, 200, { ok: true, message });
 }
@@ -731,7 +794,7 @@ async function handleCreateGroup(req, res) {
   }
   if (members.size < 2) return send(res, 400, { error: 'Pick at least one other person' });
 
-  rememberUser(ownerId, ownerName);
+  rememberUser(ownerId, { name: ownerName });
 
   const group = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -764,7 +827,7 @@ async function handleCreateRoom(req, res) {
   };
   rooms.set(room.id, room);
   roomHistory.set(room.id, []);
-  rememberUser(userId, cleanText(body.displayName, MAX_NAME));
+  rememberUser(userId, { name: cleanText(body.displayName, MAX_NAME) });
   refreshAllConversations();
   send(res, 200, { ok: true, room: { id: room.id, name: room.name, channel: `room:${room.id}` } });
 }
@@ -1117,7 +1180,7 @@ async function handleSignal(req, res) {
   const online = [...clients.values()].some((client) => client.userId === toId);
   if (!online) return send(res, 409, { error: 'That device is not online' });
 
-  rememberUser(fromId, fromName);
+  rememberUser(fromId, { name: fromName });
   trackCallSignal(type, { fromId, fromName, toId, callId, data: body.data ?? null });
   writeToUser(toId, 'signal', {
     fromId,
