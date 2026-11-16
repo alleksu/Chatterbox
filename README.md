@@ -63,6 +63,16 @@ HTTPS=1 TLS_CERT=C:\certs\cert.pem TLS_KEY=C:\certs\key.pem node server.js
 
 Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
 
+## Mobile app prep
+
+The web client can now target a remote Chatterbox server (useful for Capacitor/WebView wrappers):
+
+- Set a server at runtime with `?server=https://YOUR_SERVER` (persisted in local storage), or define `window.CHATTERBOX_SERVER` before `app.js` loads.
+- When a remote server is configured, API/SSE requests go to that server and the local service worker is disabled to avoid caching cross-origin issues.
+- Server CORS is enabled (`CORS_ORIGIN` env var, defaults to `*`) so packaged apps can connect.
+
+To package as a native app, wrap `public/` with Capacitor/Cordova, point it at your LAN/hosted HTTPS server, and enable camera/microphone permissions in the native project. Calls/media still require a secure origin on the server side.
+
 ## How it works
 
 - `server.js` - Node HTTP/HTTPS server. Serves the static app and streams events with Server-Sent Events (`GET /events`).

@@ -78,8 +78,19 @@ export function cleanText(value, max) {
 }
 
 function send(res, status, body, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', ...headers });
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    ...headers,
+  });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
+}
+function setCors(res) {
+  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
 }
 
 function rememberUser(userId, name) {
@@ -515,6 +526,7 @@ function handleEvents(req, res) {
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
   });
   res.write('retry: 2000\n\n');
 
@@ -1120,6 +1132,16 @@ async function handleSignal(req, res) {
 
 function requestHandler(req, res) {
   const pathname = new URL(req.url, 'http://localhost').pathname;
+
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
+      'Access-Control-Allow-Headers': 'Content-Type',
+      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+      'Access-Control-Max-Age': '86400',
+    });
+    return res.end();
+  }
 
   if (req.method === 'GET' && pathname === '/events') return handleEvents(req, res);
   if (req.method === 'GET' && pathname === '/api/health') {

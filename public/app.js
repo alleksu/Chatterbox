@@ -9,6 +9,25 @@ const DRAFT_KEY = 'lanchat.drafts';
 const MIC_KEY = 'lanchat.mic';
 const CAM_KEY = 'lanchat.cam';
 const SPEAKER_KEY = 'lanchat.speaker';
+const SERVER_KEY = 'chatterbox.server';
+
+const SERVER_URL = (() => {
+  const params = new URLSearchParams(location.search);
+  const fromQuery = params.get('server');
+  if (fromQuery) {
+    try { localStorage.setItem(SERVER_KEY, fromQuery); } catch {}
+  }
+  let stored = '';
+  try { stored = localStorage.getItem(SERVER_KEY) || ''; } catch {}
+  const raw = (window.CHATTERBOX_SERVER || fromQuery || stored || '').trim().replace(/\/+$/, '');
+  return raw;
+})();
+
+function apiUrl(path) {
+  if (!SERVER_URL) return path;
+  if (/^https?:\/\//i.test(path)) return path;
+  return `${SERVER_URL}${path.startsWith('/') ? path : `/${path}`}`;
+}
 
 let MAX_NAME = 24;
 let MAX_GROUP_NAME = 40;
@@ -1106,7 +1125,7 @@ function openDm(peer) {
 /* ---------- Message actions ---------- */
 
 async function apiJson(url, options) {
-  const response = await fetch(url, options);
+  const response = await fetch(apiUrl(url), options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || `Server responded ${response.status}`);
   return data;
@@ -1821,7 +1840,7 @@ async function sendSignal(type, data) {
 function sendSignalBeacon(target, type) {
   if (!target) return;
   try {
-    fetch('/api/signal', {
+    fetch(apiUrl('/api/signal'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       keepalive: true,
@@ -2142,7 +2161,7 @@ function connect() {
   if (source) source.close();
   setStatus('Connecting…', '');
   const params = new URLSearchParams({ id: me.id, name: me.name });
-  source = new EventSource(`/events?${params}`);
+  source = new EventSource(apiUrl(`/events?${params}`));
 
   source.addEventListener('open', () => setStatus(`Connected · ${location.host}`, 'connected'));
 
@@ -2443,7 +2462,7 @@ function uploadFile(item, conversation, pendingReply) {
 
     const xhr = new XMLHttpRequest();
     item.xhr = xhr;
-    xhr.open('POST', `/api/files?${params}`);
+    xhr.open('POST', apiUrl(`/api/files?${params}`));
     xhr.responseType = 'json';
 
     xhr.upload.addEventListener('progress', (event) => {
@@ -3287,12 +3306,16 @@ document.addEventListener('keydown', (event) => {
 
 document.addEventListener('hashchange', () => applyDeepLink());
 
-if ('serviceWorker' in navigator) {
+if ('serviceWorker' in navigator && !SERVER_URL) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => {
-      // PWA support is optional and requires a secure context.
+      // Ignore registration failures (e.g. non-secure origins on phones).
     });
   });
+} else if ('serviceWorker' in navigator && SERVER_URL) {
+  navigator.serviceWorker.getRegistrations?.().then((regs) => {
+    regs.forEach((reg) => reg.unregister().catch(() => {}));
+  }).catch(() => {});
 }
 
 applyTheme(settings.theme);
