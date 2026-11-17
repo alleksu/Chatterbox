@@ -1,0 +1,133 @@
+// Chatterbox — proposed SQLite ERD v2 (registration + sessions)
+// Based on actual supplied chatterbox.sqlite, inspected 2026-11-16.
+// This is a design proposal, NOT an applied migration.
+// New/modified: users.username, users.password_hash, users.created_at,
+// and the entire user_sessions table.
+// Existing legacy users.full_name/ip/device/credentials are retained here for
+// compatibility with schema v1, but are NOT registration form inputs.
+// SQLite implementation must enforce case-insensitive unique username
+// (e.g., CREATE UNIQUE INDEX ... ON users(username COLLATE NOCASE)).
+// All INTEGER times below use the existing app's Date.now() milliseconds.
+
+Table users {
+  user_id text [pk, note: 'Stable server-assigned user UUID; never use caller-provided device ID as authority']
+  name text [not null, note: 'Display name provided on registration']
+  username text [unique, note: 'Login identifier; enforce case-insensitive uniqueness in SQLite']
+  password_hash text [note: 'Salted password hash (scrypt or Argon2id), never plain text']
+  created_at integer [not null, note: 'Unix epoch milliseconds']
+
+  full_name text [not null, default: '', note: 'Legacy v1 column; review eventual removal']
+  ip text [not null, default: '', note: 'Legacy v1 column; avoid publicly exposing network information']
+  device text [not null, default: '', note: 'Legacy v1 column']
+  credentials text [not null, default: '', note: 'Legacy v1 field; this is device info, not a login credential']
+}
+
+Table user_sessions {
+  session_id text [pk, note: 'SHA-256 hash of opaque random token stored in HttpOnly cookie']
+  user_id text [not null, ref: > users.user_id]
+  created_at integer [not null, note: 'Unix epoch milliseconds']
+  expires_at integer [not null, note: 'Unix epoch milliseconds; enforce expiration server-side']
+
+  indexes {
+    (user_id, expires_at)
+  }
+}
+
+Table conversations {
+  channel_id text [pk, note: 'Existing channel format: general, dm:..., group:..., room:...']
+  type text [not null, note: 'general | dm | group | room']
+  name text [not null]
+  created_by text [ref: > users.user_id, note: 'Proposed FK; legacy SQLite does not enforce this relation']
+  created_at integer [not null, default: 0]
+}
+
+Table conversation_members {
+  channel_id text [not null, ref: > conversations.channel_id]
+  user_id text [not null, ref: > users.user_id]
+
+  indexes {
+    (channel_id, user_id) [pk]
+  }
+}
+
+Table messages {
+  message_id text [pk]
+  channel_id text [not null, ref: > conversations.channel_id]
+  user_id text [not null, ref: > users.user_id]
+  name text [not null, note: 'Display-name snapshot for history']
+  text text [not null]
+  created_at integer [not null]
+  kind text
+  reply_to_id text [ref: > messages.message_id, note: 'Proposed FK; legacy SQLite has no FK here']
+  reply_to_name text
+  reply_to_text text
+  edited_at integer
+  pinned_at integer
+
+  indexes {
+    (channel_id, created_at) [name: 'messages_channel_time']
+  }
+}
+
+Table message_mentions {
+  message_id text [not null, ref: > messages.message_id]
+  user_id text [not null, ref: > users.user_id]
+
+  indexes {
+    (message_id, user_id) [pk]
+  }
+}
+
+Table message_reactions {
+  message_id text [not null, ref: > messages.message_id]
+  user_id text [not null, ref: > users.user_id]
+  emoji text [not null]
+
+  indexes {
+    (message_id, user_id, emoji) [pk]
+  }
+}
+
+Table message_read_receipts {
+  message_id text [not null, ref: > messages.message_id]
+  user_id text [not null, ref: > users.user_id]
+
+  indexes {
+    (message_id, user_id) [pk]
+  }
+}
+
+Table attachments {
+  file_id text [pk]
+  message_id text [not null, unique, ref: > messages.message_id]
+  channel_id text [not null, ref: > conversations.channel_id]
+  owner_id text [not null, ref: > users.user_id]
+  name text [not null]
+  mime_type text [not null]
+  size integer [not null, note: 'Nonnegative; SQLite CHECK (size >= 0)']
+  created_at integer [not null]
+}
+
+Table calls {
+  call_id text [pk]
+  from_user_id text [not null, ref: > users.user_id]
+  to_user_id text [not null, ref: > users.user_id]
+  from_name text [not null]
+  to_name text [not null]
+  with_video integer [not null, note: '0 or 1']
+  state text [not null, note: 'ringing | active | ended | declined | busy']
+  created_at integer [not null]
+  answered_at integer [not null, default: 0]
+  ended_at integer [not null, default: 0]
+  duration integer [not null, default: 0]
+
+  indexes {
+    (from_user_id, created_at) [name: 'calls_from_created']
+    (to_user_id, created_at) [name: 'calls_to_created']
+  }
+}
+
+Table schema_info {
+  version integer [pk, note: 'Increment to 2 once a verified migration completes']
+  created_at text [not null, default: `CURRENT_TIMESTAMP`]
+}

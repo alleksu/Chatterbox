@@ -2,3 +2,14 @@ node_modules/
 certs/
 *.log
 .DS_Store
+chatterbox.sqlite
+chatterbox.sqlite-shm
+chatterbox.sqlite-wal
+*.sqlite-shm
+*.sqlite-wal
+.env
+
+*.sqlite
+*.sqlite-journal
+*.db
+*.backup-*

@@ -2920,3 +2920,42 @@ button.info-main:hover {
     min-width: 0;
   }
 }
+
+/* Chatterbox registration / login */
+.auth-card .auth-toggle {
+  margin-top: 10px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  box-shadow: none;
+}
+.auth-card .auth-toggle:hover { background: var(--accent-soft); }
+.auth-card .form-error { margin: 5px 0 12px; text-align: left; }
+.auth-card input { text-align: left; }
+.auth-card input[type="password"]::-ms-reveal,
+.auth-card input[type="password"]::-ms-clear { display: none; }
+.auth-card .password-field { position: relative; margin-bottom: 12px; }
+.auth-card .password-field input { margin-bottom: 0; padding-right: 52px; }
+.auth-card #password-visibility {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  place-items: center;
+  width: 36px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+  transform: translateY(-50%);
+}
+.auth-card #password-visibility:hover { background: var(--accent-soft); color: var(--text); filter: none; }
+
+/* Authentication remains usable with a mobile keyboard or short viewport. */
+.overlay:has(.auth-card) { overflow-y: auto; align-items: safe center; }
+.auth-card { margin: auto; max-width: 100%; }
+@media (max-width: 460px), (max-height: 650px) { .auth-card { padding: 20px; } .auth-card .card-mark { width: 40px; height: 40px; } }

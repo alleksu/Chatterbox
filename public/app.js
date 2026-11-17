@@ -1,3 +1,6 @@
+import { createAuthClient } from './auth-client.js';
+
+const authClient = createAuthClient();
 const ID_KEY = 'lanchat.id';
 const NAME_KEY = 'lanchat.name';
 const FULL_NAME_KEY = 'lanchat.fullName';
@@ -12,24 +15,12 @@ const MIC_KEY = 'lanchat.mic';
 const CAM_KEY = 'lanchat.cam';
 const SPEAKER_KEY = 'lanchat.speaker';
 const SERVER_KEY = 'chatterbox.server';
+const ACCOUNT_KEY = 'chatterbox.lastAccount';
 
-const SERVER_URL = (() => {
-  const params = new URLSearchParams(location.search);
-  const fromQuery = params.get('server');
-  if (fromQuery) {
-    try { localStorage.setItem(SERVER_KEY, fromQuery); } catch {}
-  }
-  let stored = '';
-  try { stored = localStorage.getItem(SERVER_KEY) || ''; } catch {}
-  const raw = (window.CHATTERBOX_SERVER || fromQuery || stored || '').trim().replace(/\/+$/, '');
-  return raw;
-})();
-
-function apiUrl(path) {
-  if (!SERVER_URL) return path;
-  if (/^https?:\/\//i.test(path)) return path;
-  return `${SERVER_URL}${path.startsWith('/') ? path : `/${path}`}`;
-}
+// Authenticated cookies require the UI and API to share one origin.
+// Remote-server mode must be redesigned before enabling cross-origin clients.
+const SERVER_URL = '';
+function apiUrl(path) { return path; }
 
 let MAX_NAME = 24;
 let MAX_FULL_NAME = 60;
@@ -69,7 +60,14 @@ const els = {
   nameDialog: document.getElementById('name-dialog'),
   nameForm: document.getElementById('name-form'),
   nameInput: document.getElementById('name-input'),
-  fullNameInput: document.getElementById('full-name-input'),
+  usernameInput: document.getElementById('username-input'),
+  passwordInput: document.getElementById('password-input'),
+  registrationFields: document.getElementById('registration-fields'),
+  authSubtitle: document.getElementById('auth-subtitle'),
+  authError: document.getElementById('auth-error'),
+  authSubmit: document.getElementById('auth-submit'),
+  authToggle: document.getElementById('auth-toggle'),
+  authTitle: document.getElementById('name-title'),
   changeName: document.getElementById('change-name'),
   copyLink: document.getElementById('copy-link'),
   toggleMenu: document.getElementById('toggle-menu'),
@@ -166,14 +164,6 @@ const els = {
   callHangup: document.getElementById('call-hangup'),
 };
 
-function getDeviceId() {
-  let id = localStorage.getItem(ID_KEY);
-  if (!id) {
-    id = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    localStorage.setItem(ID_KEY, id);
-  }
-  return id;
-}
 
 function loadSeen() {
   try {
@@ -229,11 +219,10 @@ function loadColors() {
 
 let customColors = loadColors();
 
-const me = {
-  id: getDeviceId(),
-  name: localStorage.getItem(NAME_KEY) || '',
-  fullName: localStorage.getItem(FULL_NAME_KEY) || '',
-};
+const me = { id: '', name: '', username: '', fullName: '' };
+let csrfToken = '';
+let authMode = 'login';
+let lastAccountId = localStorage.getItem(ACCOUNT_KEY) || '';
 const settings = {
   theme: localStorage.getItem(THEME_KEY) === 'light' ? 'light' : 'dark',
   sound: localStorage.getItem(SOUND_KEY) !== '0',
@@ -674,7 +663,7 @@ function fileUrl(file, inline) {
 function buildFileBubble(message, conversation) {
   const file = message.file;
   const wrap = make('div', 'file-msg');
-  const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
+  const isImage = ['image/png','image/jpeg','image/gif','image/webp'].includes(file.type);
 
   if (isImage) {
     wrap.classList.add('has-preview');
@@ -1265,8 +1254,11 @@ function openDm(peer) {
 /* ---------- Message actions ---------- */
 
 async function apiJson(url, options) {
-  const response = await fetch(apiUrl(url), options);
+  const accountAtStart=me.id;
+  const response = await fetch(apiUrl(url), { credentials: 'same-origin', ...options });
   const data = await response.json().catch(() => ({}));
+  if(accountAtStart && accountAtStart!==me.id) throw new Error('Account changed. Please retry.');
+  if (response.status === 401 && me.id) { clearAccountState(); location.reload(); }
   if (!response.ok) throw new Error(data.error || `Server responded ${response.status}`);
   return data;
 }
@@ -1274,7 +1266,7 @@ async function apiJson(url, options) {
 function postJson(url, body) {
   return apiJson(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}) },
     body: JSON.stringify(body),
   });
 }
@@ -2060,7 +2052,8 @@ function sendSignalBeacon(target, type) {
   try {
     fetch(apiUrl('/api/signal'), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      credentials: 'same-origin',
       keepalive: true,
       body: JSON.stringify({
         fromId: me.id,
@@ -2394,9 +2387,7 @@ async function handleSignal(signal) {
 function connect() {
   if (source) source.close();
   setStatus('Connecting.', '');
-  const params = new URLSearchParams({ id: me.id, name: me.name });
-  if (me.fullName) params.set('fullName', me.fullName);
-  source = new EventSource(apiUrl(`/events?${params}`));
+  source = new EventSource(apiUrl('/events'));
 
   source.addEventListener('open', () => setStatus(`Connected · ${location.host}`, 'connected'));
 
@@ -2524,6 +2515,7 @@ function connect() {
   });
 
   source.addEventListener('error', () => {
+    if(me.id) apiJson('/api/auth/me').catch(() => {});
     setStatus('Disconnected — retrying…', 'offline');
   });
 }
@@ -2658,7 +2650,7 @@ async function sendMessage() {
       renderChannels();
     }
   } catch (error) {
-    if (activeId === targetId) {
+    if (me.id && activeId === targetId) {
       if (!els.input.value) {
         els.input.value = text;
         autoResize();
@@ -2832,6 +2824,8 @@ function uploadFile(item, conversation, pendingReply, caption) {
     const xhr = new XMLHttpRequest();
     item.xhr = xhr;
     xhr.open('POST', apiUrl('/api/files?' + params));
+    xhr.setRequestHeader('X-CSRF-Token', csrfToken);
+    xhr.withCredentials = true;
     xhr.responseType = 'json';
 
     xhr.upload.addEventListener('progress', (event) => {
@@ -3691,31 +3685,151 @@ els.toggleSound.addEventListener('click', () => {
 
 els.toggleNotify.addEventListener('click', toggleNotifications);
 
-function askForName(firstTime) {
-  els.nameInput.value = firstTime ? '' : me.name;
-  els.fullNameInput.value = firstTime ? '' : (me.fullName || '');
-  els.nameInput.maxLength = MAX_NAME;
-  els.fullNameInput.maxLength = MAX_FULL_NAME;
-  openDialog(els.nameDialog, els.nameInput);
-  els.nameInput.select();
+function clearAccountState() {
+  if(source) { source.close(); source=null; }
+  if(call) endCall('Signed out', null);
+  for(const item of uploads) { item.cancelled=true; item.xhr?.abort(); }
+  uploads=[]; uploadInProgress=false; renderUploads();
+  replyTo=null; editingId=null; searchQuery=''; selectedMessageId=null; typingByChannel.clear(); sentReads.clear();
+  globalSearchRequest++; clearTimeout(globalSearchTimer);
+  for(const key of ['pinsList','callsList','searchResults']) els[key]?.replaceChildren();
+  updateComposerBanner();
+  els.input.value=''; autoResize();
+  conversations=[]; users=[]; callLog=[]; seen={}; drafts={}; activeId='general';
+  me.id=''; me.name=''; me.username=''; csrfToken=''; lastAccountId='';
+  for(const key of [ACCOUNT_KEY,SEEN_KEY,DRAFT_KEY,CHANNEL_KEY]) localStorage.removeItem(key);
+  for(const dialog of document.querySelectorAll('.overlay')) dialog.hidden=true;
+  renderChannels(); renderUsers(); renderMessages();
+  els.meName.textContent='';
+}
+window.addEventListener('storage', event => {
+  if(event.key===ACCOUNT_KEY && event.newValue!==me.id && me.id) { location.reload(); }
+});
+document.getElementById('password-visibility').addEventListener('click', event => {
+  const visible=els.passwordInput.type==='password';
+  els.passwordInput.type=visible?'text':'password';
+  const label=visible?'Hide password':'Show password';
+  event.currentTarget.setAttribute('aria-label',label);
+  event.currentTarget.title=label;
+  event.currentTarget.setAttribute('aria-pressed',String(visible));
+  event.currentTarget.innerHTML=visible
+    ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.6a2 2 0 0 0 2.8 2.8M9.9 5.2A10.8 10.8 0 0 1 12 5c6 0 9.5 7 9.5 7a14.6 14.6 0 0 1-3.1 4.1M6.6 6.6C4 8.3 2.5 12 2.5 12s3.5 7 9.5 7c1 0 2-.2 2.9-.5"/></svg>'
+    : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>';
+});
+function showAuth(mode = 'login') {
+  els.passwordInput.type='password';
+  const passwordVisibility=document.getElementById('password-visibility');
+  passwordVisibility.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>';
+  passwordVisibility.setAttribute('aria-label','Show password');
+  passwordVisibility.title='Show password';
+  passwordVisibility.setAttribute('aria-pressed','false');
+  authMode = mode;
+  const registering = mode === 'register';
+  els.authTitle.textContent = registering ? 'Create your Chatterbox account' : 'Log in to Chatterbox';
+  els.authSubtitle.textContent = registering
+    ? 'Only your name, username and password are required.'
+    : 'Use your username and password to continue chatting.';
+  els.registrationFields.hidden = !registering;
+  els.nameInput.disabled = !registering;
+  els.nameInput.required = registering;
+  els.passwordInput.autocomplete = registering ? 'new-password' : 'current-password';
+  els.authSubmit.textContent = registering ? 'Create account' : 'Log in';
+  els.authToggle.textContent = registering ? 'Already registered? Log in' : 'No account? Create one';
+  els.authError.hidden = true;
+  els.passwordInput.value = '';
+  els.nameDialog.hidden = false;
+  openDialog(els.nameDialog, registering ? els.nameInput : els.usernameInput);
 }
 
-els.nameForm.addEventListener('submit', (event) => {
-  event.preventDefault();
-  const name = els.nameInput.value.trim().slice(0, MAX_NAME);
-  const fullName = els.fullNameInput.value.trim().slice(0, MAX_FULL_NAME);
-  if (!name) return;
-  me.name = name;
-  me.fullName = fullName;
-  localStorage.setItem(NAME_KEY, name);
-  if (fullName) localStorage.setItem(FULL_NAME_KEY, fullName);
-  else localStorage.removeItem(FULL_NAME_KEY);
-  els.meName.textContent = name;
+els.authToggle.addEventListener('click', () => showAuth(authMode === 'login' ? 'register' : 'login'));
+
+function setAuthenticated(data) {
+  const user = data.user;
+  if(lastAccountId !== user.id) clearAccountState();
+  if (lastAccountId !== user.id) {
+    conversations = [];
+    users = [];
+    callLog = [];
+    seen = {};
+    drafts = {};
+    activeId = 'general';
+    localStorage.removeItem(SEEN_KEY);
+    localStorage.removeItem(DRAFT_KEY);
+    localStorage.removeItem(CHANNEL_KEY);
+    renderChannels();
+    renderUsers();
+  }
+  lastAccountId = user.id;
+  localStorage.setItem(ACCOUNT_KEY, user.id);
+  me.id = user.id;
+  me.name = user.name;
+  me.username = user.username;
+  me.fullName = '';
+  csrfToken = data.csrfToken;
+  els.meName.textContent = `${me.name} (@${me.username})`;
   closeDialog(els.nameDialog);
+  updateHeader(activeConversation());
   connect();
+}
+
+els.nameForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  els.authError.hidden = true;
+  if(els.authSubmit.disabled) return;
+  els.authSubmit.disabled = true;
+  els.authToggle.disabled = true;
+  els.nameForm.setAttribute('aria-busy','true');
+  els.authSubmit.textContent = authMode==='register' ? 'Creating account...' : 'Logging in...';
+  try {
+    const result = await authClient.submit(authMode, {
+      name: els.nameInput.value,
+      username: els.usernameInput.value,
+      password: els.passwordInput.value,
+    });
+    setAuthenticated(result);
+    els.nameForm.reset();
+  } catch (error) {
+    els.authError.textContent = error.message;
+    els.authError.hidden = false;
+  } finally {
+    els.authSubmit.disabled = false;
+    els.authToggle.disabled = false;
+    els.nameForm.removeAttribute('aria-busy');
+    els.authSubmit.textContent=authMode==='register'?'Create account':'Log in';
+  }
 });
 
-els.changeName.addEventListener('click', () => askForName(false));
+els.changeName.addEventListener('click', async () => {
+  try {
+    await postJson('/api/auth/logout', {});
+  } catch (error) {
+    toast(`Could not log out: ${error.message}`, 'error');
+    return;
+  }
+  if (source) { source.close(); source = null; }
+  if (call) endCall('Logged out', null);
+  me.id = '';
+  lastAccountId = '';
+  localStorage.removeItem(ACCOUNT_KEY);
+  me.name = '';
+  me.username = '';
+  csrfToken = '';
+  els.meName.textContent = '—';
+  conversations = [];
+  users = [];
+  callLog = [];
+  activeId = 'general';
+  seen = {};
+  drafts = {};
+  localStorage.removeItem(SEEN_KEY);
+  localStorage.removeItem(DRAFT_KEY);
+  localStorage.removeItem(CHANNEL_KEY);
+  renderChannels();
+  renderUsers();
+  renderMessages();
+  clearAccountState();
+  location.reload();
+});
 
 els.copyLink.addEventListener('click', async () => {
   const label = els.copyLink.querySelector('.label');
@@ -3857,7 +3971,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     const dialog = topOpenDialog();
     if (dialog) {
-      if (dialog === els.nameDialog && !me.name) return;
+      if (dialog === els.nameDialog && !me.id) return;
       if (dialog === els.groupDialog) closeDialog(els.groupDialog);
       else if (dialog === els.roomDialog) closeDialog(els.roomDialog);
       else if (dialog === els.pinsDialog) closeDialog(els.pinsDialog);
@@ -3902,12 +4016,20 @@ syncSettingButtons();
 renderChannels();
 loadDraft(activeId);
 
-if (me.name) {
-  els.meName.textContent = me.name;
-  els.nameDialog.hidden = true;
-  updateHeader(activeConversation());
-  renderMessages({ scroll: false });
-  connect();
-} else {
-  askForName(true);
+async function restoreLogin() {
+  try {
+    const data = await authClient.session();
+    if (data.user) setAuthenticated(data);
+    else {
+      showAuth(lastAccountId ? 'login' : 'register');
+      setStatus('Create an account or log in', '');
+    }
+  } catch (error) {
+    showAuth(lastAccountId ? 'login' : 'register');
+    els.authError.textContent = error.message;
+    els.authError.hidden = false;
+    setStatus('Cannot connect', 'offline');
+  }
 }
+
+restoreLogin();

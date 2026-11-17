@@ -7,6 +7,13 @@
   "scripts": {
     "start": "node server.js",
     "start:https": "node scripts/https.mjs",
-    "cert": "node scripts/generate-cert.mjs"
+    "cert": "node scripts/generate-cert.mjs",
+    "test": "node scripts/test-migration.mjs && node scripts/test-auth.mjs",
+    "db:backup": "node scripts/backup-db.mjs",
+    "db:migrate": "node scripts/migrate-db.mjs",
+    "test:https": "node scripts/test-https.mjs"
+  },
+  "engines": {
+    "node": ">=22.13.0"
   }
 }
