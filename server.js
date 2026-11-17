@@ -7,8 +7,8 @@ import os from 'node:os';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   sessionActive, authenticateRequest, cleanupSessions, createSession, invalidateSession,
-  loginUser, lookupUser, normalizeName, normalizeUsername, publicUser,
-  registerUser, validPassword,
+  addFriend, friendsOf, loginUser, lookupUser, normalizeName, normalizeUsername, publicUser,
+  registerUser, removeFriend, validPassword,
 } from './auth-db.mjs';
 import { fileURLToPath } from 'node:url';
 
@@ -163,6 +163,33 @@ function onlineUsers() {
     });
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function friendsFor(userId) {
+  const online = new Set([...clients.values()].map((client) => client.userId));
+  return friendsOf(userId).map((friend) => ({
+    id: friend.user_id,
+    name: friend.name,
+    username: friend.username,
+    online: online.has(friend.user_id),
+  }));
+}
+
+function sendFriendsTo(userId) {
+  writeToUser(userId, 'friends', { friends: friendsFor(userId) });
+}
+
+function refreshFriendsFor(userIds) {
+  const seen = new Set();
+  for (const id of userIds) {
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    sendFriendsTo(id);
+  }
+}
+
+function refreshAllFriends() {
+  refreshFriendsFor([...clients.values()].map((client) => client.userId));
 }
 
 function nameTakenBy(name, userId) {
@@ -644,6 +671,7 @@ function handleEvents(req, res) {
   const init = {
     conversations: conversationsFor(userId),
     users: onlineUsers(),
+    friends: friendsFor(userId),
     mentions: mentionsFor(userId),
     calls: callsFor(userId),
     config: {
@@ -657,12 +685,14 @@ function handleEvents(req, res) {
   };
   res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
   broadcast('presence', { users: onlineUsers() });
+  refreshAllFriends();
   refreshAllConversations();
 
   req.on('close', () => {
     clients.delete(connectionId);
     clearTypingForUser(userId);
     broadcast('presence', { users: onlineUsers() });
+    refreshAllFriends();
     refreshAllConversations();
   });
 }
@@ -846,6 +876,36 @@ async function handleDelete(req, res) {
 
   deliverToChannel(info, 'message-delete', { channel: channelIdFor(info), id, name: message.name, userId });
   send(res, 200, { ok: true });
+}
+
+async function handleAddFriend(req, res) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+
+  const userId = req.auth.id;
+  const friendId = cleanText(body.friendId, 64);
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  if (!friendId) return send(res, 400, { error: 'Choose a user to add' });
+  if (friendId === userId) return send(res, 400, { error: 'You cannot add yourself' });
+  if (!lookupUser(friendId)?.username) return send(res, 404, { error: 'User not found' });
+
+  addFriend(userId, friendId);
+  refreshFriendsFor([userId, friendId]);
+  send(res, 200, { ok: true, friends: friendsFor(userId) });
+}
+
+async function handleRemoveFriend(req, res) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+
+  const userId = req.auth.id;
+  const friendId = cleanText(body.friendId, 64);
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  if (!friendId) return send(res, 400, { error: 'Choose a friend to remove' });
+
+  removeFriend(userId, friendId);
+  refreshFriendsFor([userId, friendId]);
+  send(res, 200, { ok: true, friends: friendsFor(userId) });
 }
 
 async function handleCreateGroup(req, res) {
@@ -1442,6 +1502,8 @@ function requestHandler(req, res) {
   if (req.method === 'POST' && pathname === '/api/messages/edit') return handleEdit(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/delete') return handleDelete(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/pin') return handlePin(req, res);
+  if (req.method === 'POST' && pathname === '/api/friends') return handleAddFriend(req, res);
+  if (req.method === 'POST' && pathname === '/api/friends/remove') return handleRemoveFriend(req, res);
   if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
   if (req.method === 'POST' && pathname === '/api/groups/leave') return handleLeaveGroup(req, res);
   if (req.method === 'POST' && pathname === '/api/rooms') return handleCreateRoom(req, res);
@@ -1450,6 +1512,9 @@ function requestHandler(req, res) {
   if (req.method === 'POST' && pathname === '/api/reactions') return handleReactions(req, res);
   if (req.method === 'POST' && pathname === '/api/read-receipt') return handleReadReceipt(req, res);
   if (req.method === 'POST' && pathname === '/api/typing') return handleTyping(req, res);
+  if (req.method === 'GET' && pathname === '/api/friends') {
+    return send(res, 200, { friends: friendsFor(req.auth.id) }, { 'Cache-Control': 'no-store' });
+  }
   if (req.method === 'GET' && pathname === '/api/search') return handleSearch(req, res);
   if (req.method === 'GET' && pathname === '/api/export') return handleExport(req, res);
   if (req.method === 'GET' && pathname === '/api/calls') {

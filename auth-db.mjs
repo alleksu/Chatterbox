@@ -14,7 +14,7 @@ async function scrypt(password, salt, length, legacy = false) {
 }
 const db = new DatabaseSync(path.resolve(process.env.CHATTERBOX_DB_PATH || fileURLToPath(new URL('./chatterbox.sqlite', import.meta.url))));
 const version = db.prepare("SELECT MAX(version) AS version FROM schema_info").get().version;
-if (version !== 2) throw new Error('Database migration required: run npm run db:migrate first.');
+if (version !== 3) throw new Error('Database migration required: run npm run db:migrate first.');
 db.exec('PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON');
 
 export const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -28,6 +28,11 @@ const findSession = db.prepare(`SELECT users.user_id, users.name, users.username
  WHERE user_sessions.session_id = ? AND user_sessions.expires_at > ? AND users.username IS NOT NULL`);
 const deleteSession = db.prepare('DELETE FROM user_sessions WHERE session_id = ?');
 const clearExpired = db.prepare('DELETE FROM user_sessions WHERE expires_at <= ?');
+const friendList = db.prepare(`SELECT users.user_id, users.name, users.username
+ FROM friendships JOIN users ON users.user_id = friendships.friend_id
+ WHERE friendships.user_id = ? ORDER BY users.name COLLATE NOCASE`);
+const insertFriendship = db.prepare('INSERT OR IGNORE INTO friendships (user_id, friend_id, created_at) VALUES (?, ?, ?)');
+const deleteFriendships = db.prepare('DELETE FROM friendships WHERE (user_id = ? AND friend_id = ?) OR (user_id = ? AND friend_id = ?)');
 
 export function publicUser(user) {
   return { id: user.user_id, name: user.name, username: user.username };
@@ -88,6 +93,25 @@ export function authenticateRequest(req) {
   return session ? { ...publicUser(session), sessionId: session.session_id, expiresAt: session.expires_at, csrfToken: csrfForToken(token) } : null;
 }
 export function invalidateSession(id) { deleteSession.run(id); }
+export function friendsOf(userId) { return friendList.all(userId); }
+export function addFriend(userId, friendId) {
+  if (!userId || !friendId || userId === friendId) return;
+  const now = Date.now();
+  // Friendships are mutual, so store both directions.
+  db.exec('BEGIN');
+  try {
+    insertFriendship.run(userId, friendId, now);
+    insertFriendship.run(friendId, userId, now);
+    db.exec('COMMIT');
+  } catch (error) {
+    if (db.isTransaction) db.exec('ROLLBACK');
+    throw error;
+  }
+}
+export function removeFriend(userId, friendId) {
+  if (!userId || !friendId) return;
+  deleteFriendships.run(userId, friendId, friendId, userId);
+}
 export function cleanupSessions() { clearExpired.run(Date.now()); }
 
 export function sessionActive(id) { return Boolean(db.prepare('SELECT 1 FROM user_sessions WHERE session_id=? AND expires_at>?').get(id,Date.now())); }

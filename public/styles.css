@@ -557,6 +557,46 @@ svg {
   color: var(--muted);
 }
 
+.friend-action {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.friend-action:hover {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: rgba(123, 155, 255, 0.22);
+}
+
+.friend-action.is-friend {
+  color: var(--accent);
+  border-color: rgba(123, 155, 255, 0.22);
+  background: var(--accent-soft);
+}
+
+.members-panel #friends {
+  flex: 0 1 auto;
+  max-height: 38%;
+}
+
+.friends-empty {
+  margin: 2px 4px 12px;
+  color: var(--muted-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
 .sidebar-footer {
   border-top: 1px solid var(--border);
   padding-top: 13px;

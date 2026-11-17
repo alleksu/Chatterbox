@@ -28,7 +28,7 @@ export function migrate(file = databasePath) {
     db.exec('BEGIN IMMEDIATE');
     db.exec('CREATE TABLE IF NOT EXISTS schema_info(version INTEGER PRIMARY KEY, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
     const version=db.prepare('SELECT MAX(version) AS version FROM schema_info').get().version || 0;
-    if (version > 2) throw new Error('Unsupported future database schema');
+    if (version > 3) throw new Error('Unsupported future database schema');
     if(version < 2) {
       db.exec(`CREATE TABLE IF NOT EXISTS users (
   user_id TEXT PRIMARY KEY,
@@ -57,6 +57,17 @@ CREATE INDEX IF NOT EXISTS user_sessions_user ON user_sessions(user_id, expires_
 
 
       db.exec('INSERT INTO schema_info(version) VALUES (2)');
+    }
+    if(version < 3) {
+      db.exec(`CREATE TABLE IF NOT EXISTS friendships (
+  user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  friend_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, friend_id)
+);
+CREATE INDEX IF NOT EXISTS friendships_friend ON friendships(friend_id);
+`);
+      db.exec('INSERT INTO schema_info(version) VALUES (3)');
     }
     verify(db);
     db.exec('COMMIT');

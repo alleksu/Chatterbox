@@ -45,6 +45,9 @@ const REACTION_MAX = 10;
 const els = {
   messages: document.getElementById('messages'),
   users: document.getElementById('users'),
+  friends: document.getElementById('friends'),
+  friendsCount: document.getElementById('friends-count'),
+  friendsEmpty: document.getElementById('friends-empty'),
   channels: document.getElementById('channels'),
   onlineCount: document.getElementById('online-count'),
   status: document.getElementById('status'),
@@ -234,6 +237,7 @@ const settings = {
 
 let source = null;
 let users = [];
+let friends = [];
 let conversations = [];
 let seen = loadSeen();
 let drafts = loadDrafts();
@@ -1164,6 +1168,84 @@ function conversationMembers(conversation) {
   return users.map((user) => ({ ...user, online: true }));
 }
 
+function isFriend(userId) {
+  return friends.some((friend) => friend.id === userId);
+}
+
+function friendActionButton(user) {
+  const button = make('button', 'friend-action', isFriend(user.id) ? '\u2605' : '+');
+  button.type = 'button';
+  const friend = isFriend(user.id);
+  const label = friend ? `Remove ${user.name} from friends` : `Add ${user.name} as a friend`;
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  if (friend) button.classList.add('is-friend');
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (friend) removeFriend(user);
+    else addFriend(user);
+  });
+  return button;
+}
+
+async function addFriend(user) {
+  try {
+    const data = await postJson('/api/friends', { friendId: user.id });
+    if (Array.isArray(data.friends)) friends = data.friends;
+    renderFriends();
+    renderUsers();
+    toast(`${user.name} added to friends`);
+  } catch (error) {
+    toast(`Could not add friend: ${error.message}`, 'error');
+  }
+}
+
+async function removeFriend(user) {
+  try {
+    const data = await postJson('/api/friends/remove', { friendId: user.id });
+    if (Array.isArray(data.friends)) friends = data.friends;
+    renderFriends();
+    renderUsers();
+    toast(`${user.name} removed from friends`);
+  } catch (error) {
+    toast(`Could not remove friend: ${error.message}`, 'error');
+  }
+}
+
+function renderFriends() {
+  if (!els.friends) return;
+  const onlineIds = new Set(users.map((user) => user.id));
+  const list = [...friends].sort((a, b) => {
+    return Number(onlineIds.has(b.id)) - Number(onlineIds.has(a.id)) || a.name.localeCompare(b.name);
+  });
+  const onlineCount = list.filter((friend) => onlineIds.has(friend.id)).length;
+  els.friendsCount.textContent = String(onlineCount);
+  els.friendsCount.title = `${onlineCount} of ${list.length} friends online`;
+  els.friendsEmpty.hidden = list.length > 0;
+  els.friends.replaceChildren();
+
+  for (const friend of list) {
+    const online = onlineIds.has(friend.id);
+    const li = make('li', 'clickable');
+    if (!online) li.classList.add('offline');
+    li.title = `Message ${friend.name}`;
+
+    const avatar = make('div', 'avatar', initials(friend.name));
+    avatar.style.background = avatarColor(friend.name);
+
+    const info = make('div', 'user-info');
+    info.append(make('span', 'user-name', friend.name));
+    info.append(make('span', 'user-meta', online ? 'Online' : 'Offline'));
+
+    const dot = make('span', 'presence-dot');
+    dot.title = online ? 'Online' : 'Offline';
+
+    li.append(avatar, info, dot, friendActionButton(friend));
+    li.addEventListener('click', () => openDm(friend));
+    els.friends.append(li);
+  }
+}
+
 function renderUsers() {
   const conversation = activeConversation();
   const members = conversationMembers(conversation);
@@ -1197,6 +1279,7 @@ function renderUsers() {
       li.classList.add('clickable');
       li.title = `Send ${user.name} a private message`;
       li.addEventListener('click', () => openDm(user));
+      li.insertBefore(friendActionButton(user), dot);
     }
 
     els.users.append(li);
@@ -2419,8 +2502,10 @@ function connect() {
       configureRtc(data.config);
     }
     users = data.users || [];
+    friends = data.friends || [];
     callLog = data.calls || [];
     renderUsers();
+    renderFriends();
     applyConversations(data.conversations);
     applyDeepLink(pendingDeepLink || parseDeepLink());
   });
@@ -2448,10 +2533,21 @@ function connect() {
   source.addEventListener('presence', (event) => {
     users = JSON.parse(event.data).users || [];
     renderUsers();
+    renderFriends();
     for (const conversation of conversations) {
       if (conversation.type === 'dm') {
         conversation.online = users.some((user) => user.id === conversation.peerId);
       }
+    }
+  });
+
+  source.addEventListener('friends', (event) => {
+    try {
+      friends = JSON.parse(event.data).friends || [];
+      renderFriends();
+      renderUsers();
+    } catch {
+      // Ignore malformed payloads.
     }
   });
 
@@ -3695,11 +3791,11 @@ function clearAccountState() {
   for(const key of ['pinsList','callsList','searchResults']) els[key]?.replaceChildren();
   updateComposerBanner();
   els.input.value=''; autoResize();
-  conversations=[]; users=[]; callLog=[]; seen={}; drafts={}; activeId='general';
+  conversations=[]; users=[]; friends=[]; callLog=[]; seen={}; drafts={}; activeId='general';
   me.id=''; me.name=''; me.username=''; csrfToken=''; lastAccountId='';
   for(const key of [ACCOUNT_KEY,SEEN_KEY,DRAFT_KEY,CHANNEL_KEY]) localStorage.removeItem(key);
   for(const dialog of document.querySelectorAll('.overlay')) dialog.hidden=true;
-  renderChannels(); renderUsers(); renderMessages();
+  renderChannels(); renderUsers(); renderFriends(); renderMessages();
   els.meName.textContent='';
 }
 window.addEventListener('storage', event => {
@@ -3749,6 +3845,7 @@ function setAuthenticated(data) {
   if (lastAccountId !== user.id) {
     conversations = [];
     users = [];
+    friends = [];
     callLog = [];
     seen = {};
     drafts = {};
@@ -3817,6 +3914,7 @@ els.changeName.addEventListener('click', async () => {
   els.meName.textContent = '—';
   conversations = [];
   users = [];
+  friends = [];
   callLog = [];
   activeId = 'general';
   seen = {};

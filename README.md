@@ -43,6 +43,7 @@ HTTPS=1 TLS_CERT=C:\certs\cert.pem TLS_KEY=C:\certs\key.pem node server.js
 - **General room** - the public channel every connected device shares.
 - **Public rooms** - create additional named rooms from the Rooms section. Everyone on the server can see and join them.
 - **Private messages** - click a name under **Online** to open a one-to-one conversation.
+- **Friends** - use the **+** button next to an online user to add them as a friend. Friends appear in their own section of the side panel with live online/offline status, and the **★** button removes them again.
 - **Groups** - create a named group and choose its members. Group messages only reach members. View the member list and leave a group from the chat menu.
 - **Chat members** - the side panel shows the full member list in groups and everyone online in public rooms.
 - **Mentions** - type `@` to pick an online user. Mentioned messages are highlighted for the recipient, with a notification and a louder alert sound.
@@ -82,6 +83,10 @@ The old `?server=` cross-origin server override is disabled in this authenticate
   - `POST /api/groups`, `POST /api/groups/leave`, `POST /api/rooms`
   - `POST /api/messages/edit`, `POST /api/messages/delete`, `POST /api/messages/pin`
   - `POST /api/reactions`, `POST /api/read-receipt`, `POST /api/typing`
+- Friends:
+  - `GET /api/friends` lists your friends with live online status
+  - `POST /api/friends` with `{ friendId }` adds a mutual friend
+  - `POST /api/friends/remove` with `{ friendId }` removes one
 - Discovery and history:
   - `GET /api/search?id=<user>&q=<query>` (optional `channel`)
   - `GET /api/export?id=<user>&channel=<channel>&format=json|html`
