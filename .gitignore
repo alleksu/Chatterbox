@@ -8,7 +8,6 @@ chatterbox.sqlite-wal
 *.sqlite-shm
 *.sqlite-wal
 .env
-
 *.sqlite
 *.sqlite-journal
 *.db
