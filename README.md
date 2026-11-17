@@ -1,11 +1,12 @@
 # Chatterbox
 
-A tiny local web chat for devices on the same network. No accounts, no internet, no dependencies - just Node.js.
+A local web chat for devices on the same network. Basic account registration, login, and session storage use SQLite via Node.js built-in `node:sqlite`; there are no npm runtime dependencies. **Node.js 22.13+ required.**
 
 ## Run it
 
-```bash
-npm start
+```powershell
+npm.cmd run db:migrate
+npm.cmd start
 ```
 
 If PowerShell blocks `npm.ps1` ("running scripts is disabled on this system"), use `npm.cmd start` or `node server.js`.
@@ -17,7 +18,7 @@ The server binds to `0.0.0.0` and prints the addresses to open:
   On the LAN:       http://192.168.1.23:3000
 ```
 
-Open the LAN address on any phone, tablet or computer connected to the same network, pick a name, and chat. Use **Invite** in the sidebar to copy the address and share it.
+Open `http://localhost:3000` to create an account with Name, Username and Password. New visitors see **Create your Chatterbox account** first; existing users can select **Already registered? Log in**. For another device on the LAN, **start in HTTPS mode** (`npm run cert` then `npm run start:https`) before registering or logging in. Use **Invite** in the sidebar to copy the address and share it.
 
 ## HTTPS for phone calls
 
@@ -28,7 +29,7 @@ npm run cert
 npm run start:https
 ```
 
-Use `npm.cmd run cert` / `npm.cmd run start:https` if PowerShell blocks npm scripts. The certificate script uses OpenSSL (Git for Windows includes it) and creates `certs/cert.pem` and `certs/key.pem` with `localhost` and your current LAN addresses. Open the printed `https://` address and accept the self-signed certificate warning once per device.
+Use `npm.cmd run cert` / `npm.cmd run start:https` if PowerShell blocks npm scripts. The certificate script uses OpenSSL (Git for Windows includes it) and creates `certs/cert.pem` and `certs/key.pem` with `localhost` and your current LAN addresses. Open the printed `https://` address and configure each device to trust the issuing local certificate authority.
 
 You can also supply your own certificate:
 
@@ -61,21 +62,18 @@ HTTPS=1 TLS_CERT=C:\certs\cert.pem TLS_KEY=C:\certs\key.pem node server.js
 - **PWA** - install Chatterbox from the browser on a secure origin. Notifications open the exact conversation and message.
 - **Sounds, desktop alerts, light/dark themes** - all remembered on the device.
 
-Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
+Run `npm test` to verify registration, login, authentication, and SQLite persistence. Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
 
-## Mobile app prep
+The initial session check (`GET /api/auth/session`) returns a successful signed-out response when there is no session. Protected endpoints still return 401 without a login. Connection failures, timeouts and HTTPS requirements appear inside the account form. Usernames use 3–24 letters, numbers, dots or underscores, and passwords use 8–128 characters.
 
-The web client can now target a remote Chatterbox server (useful for Capacitor/WebView wrappers):
+## Cross-origin/mobile deployment
 
-- Set a server at runtime with `?server=https://YOUR_SERVER` (persisted in local storage), or define `window.CHATTERBOX_SERVER` before `app.js` loads.
-- When a remote server is configured, API/SSE requests go to that server and the local service worker is disabled to avoid caching cross-origin issues.
-- Server CORS is enabled (`CORS_ORIGIN` env var, defaults to `*`) so packaged apps can connect.
-
-To package as a native app, wrap `public/` with Capacitor/Cordova, point it at your LAN/hosted HTTPS server, and enable camera/microphone permissions in the native project. Calls/media still require a secure origin on the server side.
+The old `?server=` cross-origin server override is disabled in this authenticated version. Cookie sessions, CSRF protection and the browser frontend currently require the same origin for the app and API. To add native app clients later, design a separately authenticated mobile client interface instead of exposing cross-origin cookies.
 
 ## How it works
 
-- `server.js` - Node HTTP/HTTPS server. Serves the static app and streams events with Server-Sent Events (`GET /events`).
+- `server.js` - Node HTTP/HTTPS server. Serves the static app, authenticated endpoints, and SSE (`GET /events`).
+- `auth-db.mjs` - SQLite auto-migration, salted password hashing, sessions, credential verification.
 - `public/` - the dependency-free UI, service worker, manifest, and icons.
 - Messages are posted to `POST /api/messages` with a channel (`general`, `dm:<a>:<b>`, `group:<id>`, or `room:<id>`).
 - Conversations and actions:
@@ -89,12 +87,24 @@ To package as a native app, wrap `public/` with Capacitor/Cordova, point it at y
 - Calls use `POST /api/signal` for SDP and ICE signalling. The server records ended/declined/busy call history for the two participants.
 - Files stream to `POST /api/files` and download from `GET /api/files/:id` (add `?inline=1` for inline previews). Every message is delivered only to the conversation's participants.
 
-State is kept in memory, so history (last 300 messages per conversation), DMs, groups, rooms, and call history are lost when the server restarts. Uploaded files are stored in the OS temp folder and cleared on startup.
+Accounts and sessions persist in SQLite, but chat state is still kept in memory, so history (last 300 messages per conversation), DMs, groups, rooms, and call history are lost when the server restarts. Uploaded files are stored in the OS temp folder and cleared on startup.
 
 ## Notes
 
 - If other devices cannot connect, allow Node through the firewall on the port you use (private networks on Windows, for example) and make sure the network does not isolate clients from each other.
-- Use HTTPS for calls, screen sharing, notifications, and installation from phones. Self-signed certificates require accepting a browser warning once on each device.
-- Chatterbox has no authentication. Anyone on the LAN who knows the address can read and post messages and can access public rooms. Run it only on networks you trust.
-- To use it over the internet, put it behind a reverse proxy with TLS; do not expose the port directly.
+- Use HTTPS for calls, screen sharing, notifications, and installation from phones. The generated self-signed certificate is a development aid; use a trusted local CA for LAN devices and verify the certificate covers the hostname or IP used.
+- Chatterbox requires registration or login for chat API access. Always use HTTPS for other LAN devices, and run only on networks you trust. No email or password-reset service is included.
+- To use it over the internet, design and test a separate hardened deployment. TLS-terminating reverse proxies are not currently supported: the app uses the actual TLS socket, not forwarded headers, to decide cookie security.
 - `certs/` is ignored by git and should never be committed.
+
+## Registration and SQLite migration
+
+See [`COPY_INTO_VSCODE.md`](COPY_INTO_VSCODE.md) for the manual-copy steps, backup precautions, Node version requirements, and testing instructions. Run `npm.cmd run db:migrate` explicitly before first launch. This creates and verifies a backup when the database already exists, then applies a versioned transaction. Normal server startup never migrates the schema. Stop Chatterbox before migration.
+
+## Verification and operating limits
+
+`npm.cmd test` runs migration and HTTP integration tests on disposable databases. `npm.cmd run test:https` checks TLS verification and Secure cookies using a disposable certificate; it requires OpenSSL (`OPENSSL` can specify its executable). Physical LAN access, browser accessibility/responsiveness, camera/microphone permissions and real WebRTC media need manual verification.
+
+Sessions expire after seven days. HTTP authentication is allowed only from loopback for development; LAN APIs require direct HTTPS. The server rejects cross-origin requests and requires a CSRF token for authenticated mutations. Message, signalling, upload and connection budgets bound resource use. Limits are process-local and reset on restart. Chat remains transient; account/session persistence does not make chat history durable.
+
+See `IMPLEMENTATION_REPORT.md` for the verified migration backup, results, limitations and rollback procedure.

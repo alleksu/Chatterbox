@@ -3,11 +3,16 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import {
+  sessionActive, authenticateRequest, cleanupSessions, createSession, invalidateSession,
+  loginUser, lookupUser, normalizeName, normalizeUsername, publicUser,
+  registerUser, validPassword,
+} from './auth-db.mjs';
 import { fileURLToPath } from 'node:url';
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = '0.0.0.0';
+const HOST = process.env.CHATTERBOX_HOST || '0.0.0.0';
 const MAX_HISTORY = 300;
 const MAX_TEXT = 4000;
 const MAX_NAME = 24;
@@ -24,21 +29,13 @@ const MAX_CALL_HISTORY = 50;
 
 const appDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(appDir, 'public');
-const filesDir = path.join(os.tmpdir(), `chatterbox-files-${PORT}`);
+const filesDir = fs.mkdtempSync(path.join(os.tmpdir(), `chatterbox-files-${PORT}-`));
 const USE_HTTPS = process.env.HTTPS === '1' || String(process.env.HTTPS).toLowerCase() === 'true';
 const tlsCertPath = path.resolve(process.env.TLS_CERT || path.join(appDir, 'certs', 'cert.pem'));
 const tlsKeyPath = path.resolve(process.env.TLS_KEY || path.join(appDir, 'certs', 'key.pem'));
 const scheme = USE_HTTPS ? 'https' : 'http';
 
 fs.mkdirSync(filesDir, { recursive: true });
-for (const name of fs.readdirSync(filesDir)) {
-  try {
-    fs.rmSync(path.join(filesDir, name), { recursive: true, force: true });
-  } catch {
-    // Ignore files that are still locked by another process.
-  }
-}
-
 const clients = new Map();      // connectionId -> { res, userId, name }
 const knownUsers = new Map();   // userId -> name
 const generalHistory = [];      // messages for the public room
@@ -82,17 +79,11 @@ export function cleanText(value, max) {
 function send(res, status, body, headers = {}) {
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
     ...headers,
   });
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
-}
-function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
 }
 
 function summarizeDevice(ua) {
@@ -134,8 +125,9 @@ function rememberUser(userId, profile = {}) {
   const fullName = cleanText(next.fullName, MAX_FULL_NAME) || prev.fullName || '';
   const ip = cleanText(next.ip, 80) || prev.ip || '';
   const device = cleanText(next.device, MAX_DEVICE) || prev.device || '';
-  const credentials = cleanText(next.credentials, 180) || prev.credentials || buildCredentials(ip, device);
-  knownUsers.set(userId, { name, fullName, ip, device, credentials });
+  const credentials = '';
+  const registered = lookupUser(userId);
+  knownUsers.set(userId, { name: registered?.name || name, fullName: '', ip: '', device: '', credentials });
 }
 
 function userProfile(userId) {
@@ -160,15 +152,21 @@ function onlineUsers() {
       id: client.userId,
       name: profile.name || client.name || 'Anonymous',
       fullName: profile.fullName || '',
-      credentials: profile.credentials || buildCredentials(profile.ip, profile.device),
+      credentials: '',
     });
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function liveClient(client) {
+  if (client.res.writableEnded) return false;
+  if (client.expiresAt <= Date.now() || !sessionActive(client.sessionId)) { client.res.end(); return false; }
+  if(client.res.writableLength > 1024*1024) { client.res.destroy(); return false; }
+  return true;
+}
 function broadcast(event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of clients.values()) client.res.write(payload);
+  for (const client of clients.values()) if (liveClient(client)) client.res.write(payload);
 }
 
 /* ---------- Conversations (general, DMs, groups) ---------- */
@@ -192,7 +190,7 @@ function parseChannel(raw) {
     } catch {
       return null;
     }
-    if (!userA || !userB) return null;
+    if (!userA || !userB || userA === userB || !lookupUser(userA)?.username || !lookupUser(userB)?.username) return null;
     return { type: 'dm', id: dmChannelId(userA, userB), users: [userA, userB].sort() };
   }
 
@@ -231,6 +229,7 @@ function channelHistory(info) {
 
   if (info.type === 'dm') {
     const key = channelIdFor(info);
+    if (!dmHistory.has(key) && dmHistory.size>=5000) throw Object.assign(new Error('Conversation capacity reached'),{status:429});
     if (!dmHistory.has(key)) dmHistory.set(key, []);
     return dmHistory.get(key);
   }
@@ -337,7 +336,7 @@ function conversationsFor(userId) {
 function writeToUser(userId, event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of clients.values()) {
-    if (client.userId === userId) client.res.write(payload);
+    if (liveClient(client) && client.userId === userId) client.res.write(payload);
   }
 }
 
@@ -362,7 +361,7 @@ function refreshAllConversations() {
 function deliverToChannel(info, event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of clients.values()) {
-    if (canAccess(info, client.userId)) client.res.write(payload);
+    if (liveClient(client) && canAccess(info, client.userId)) client.res.write(payload);
   }
 }
 
@@ -465,12 +464,18 @@ function receiveFile(req, filePath) {
   });
 }
 
+let activeUploads=0;
 async function handleFileUpload(req, res) {
+  if(activeUploads>=4 || files.size>=1000 || [...files.values()].reduce((sum,file)=>sum+file.size,0)>=1024*1024*1024) { req.resume(); return send(res,429,{error:'File storage or transfer capacity reached.'}); }
+  activeUploads++;
+  try { return await receiveAuthorizedFile(req,res); } finally { activeUploads--; }
+}
+async function receiveAuthorizedFile(req, res) {
   const url = new URL(req.url, 'http://localhost');
-  const userId = cleanText(url.searchParams.get('id'), 64);
-  const senderName = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
+  const userId = req.auth.id;
+  const senderName = req.auth.name;
   const filename = cleanFilename(url.searchParams.get('filename'));
-  const type = cleanText(url.searchParams.get('type'), 120) || 'application/octet-stream';
+  let type = 'application/octet-stream';
   const info = parseChannel(url.searchParams.get('channel'));
 
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
@@ -500,6 +505,13 @@ async function handleFileUpload(req, res) {
     return send(res, 400, { error: 'File is empty' });
   }
 
+  if (!sessionActive(req.auth.sessionId)) { fs.unlink(filePath, () => {}); return send(res, 401, {error:'Please log in.'}); }
+  const header = Buffer.alloc(12);
+  const fd=fs.openSync(filePath,'r'); try { fs.readSync(fd,header,0,12,0); } finally { fs.closeSync(fd); }
+  if(header.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))) type='image/png';
+  else if(header[0]===255 && header[1]===216 && header[2]===255) type='image/jpeg';
+  else if(/^GIF8[79]a/.test(header.toString('ascii'))) type='image/gif';
+  else if(header.toString('ascii',0,4)==='RIFF' && header.toString('ascii',8,12)==='WEBP') type='image/webp';
   const channel = channelIdFor(info);
   const file = { id: fileId, name: filename, type, size };
   files.set(fileId, { ...file, path: filePath, channel, ownerId: userId, time: Date.now() });
@@ -529,7 +541,7 @@ function contentDisposition(name, inline) {
 
 function handleFileDownload(req, res, fileId) {
   const url = new URL(req.url, 'http://localhost');
-  const userId = cleanText(url.searchParams.get('id'), 64);
+  const userId = req.auth.id;
   const record = files.get(fileId);
   if (!record) return send(res, 404, { error: 'File not found' });
 
@@ -539,9 +551,11 @@ function handleFileDownload(req, res, fileId) {
     return send(res, 403, { error: 'You are not part of this conversation' });
   }
 
-  const inline = url.searchParams.get('inline') === '1';
+  const safePreviewTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+  const inline = url.searchParams.get('inline') === '1' && safePreviewTypes.has(record.type);
   res.writeHead(200, {
     'Content-Type': record.type || 'application/octet-stream',
+    'Content-Security-Policy': 'sandbox',
     'Content-Length': record.size,
     'Content-Disposition': contentDisposition(record.name, inline),
     'Cache-Control': 'no-store',
@@ -575,26 +589,26 @@ function serveStatic(req, res, pathname) {
 }
 
 function handleEvents(req, res) {
+  if ([...clients.values()].filter(c=>c.userId===req.auth.id && !c.res.writableEnded).length >= 8) return send(res,429,{error:'Too many open connections.'});
   const url = new URL(req.url, 'http://localhost');
-  const userId = cleanText(url.searchParams.get('id'), 64) || `anon-${nextConnectionId}`;
-  const name = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
-  const fullName = cleanText(url.searchParams.get('fullName'), MAX_FULL_NAME);
+  const userId = req.auth.id;
+  const name = req.auth.name;
+  const fullName = '';
   const ip = clientIp(req);
   const device = summarizeDevice(req.headers['user-agent']);
-  const credentials = buildCredentials(ip, device);
-  rememberUser(userId, { name, fullName, ip, device, credentials });
+  const credentials = '';
+  rememberUser(userId, { name });
 
   res.writeHead(200, {
     'Content-Type': 'text/event-stream; charset=utf-8',
     'Cache-Control': 'no-cache, no-transform',
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no',
-    'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
   });
   res.write('retry: 2000\n\n');
 
   const connectionId = nextConnectionId++;
-  clients.set(connectionId, { res, userId, name, fullName, ip, device, credentials });
+  clients.set(connectionId, { res, userId, name, fullName, sessionId: req.auth.sessionId, expiresAt: req.auth.expiresAt });
   const init = {
     conversations: conversationsFor(userId),
     users: onlineUsers(),
@@ -622,18 +636,25 @@ function readJson(req) {
       size += chunk.length;
       if (size > MAX_BODY) {
         reject(Object.assign(new Error('Payload too large'), { status: 413 }));
-        req.destroy();
+        chunks.length = 0;
+        req.resume();
         return;
       }
       chunks.push(chunk);
     });
     req.on('end', () => {
+      if (size > MAX_BODY) return;
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'));
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return reject(Object.assign(new Error('Expected a JSON object'), { status: 400 }));
+        }
+        resolve(body);
       } catch {
         reject(Object.assign(new Error('Invalid JSON'), { status: 400 }));
       }
     });
+    req.on('aborted', () => reject(Object.assign(new Error('Request aborted'), {status:400})));
     req.on('error', reject);
   });
 }
@@ -698,8 +719,8 @@ async function handleSend(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.id, 64);
-  const name = cleanText(body.name, MAX_NAME) || 'Anonymous';
+  const userId = req.auth.id;
+  const name = req.auth.name;
   const text = cleanText(body.text, MAX_TEXT);
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
   if (!text) return send(res, 400, { error: 'Message is empty' });
@@ -730,7 +751,7 @@ async function handleEdit(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.id, 64);
+  const userId = req.auth.id;
   const text = cleanText(body.text, MAX_TEXT);
   const info = parseChannel(body.channel);
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
@@ -755,7 +776,7 @@ async function handleDelete(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.id, 64);
+  const userId = req.auth.id;
   const info = parseChannel(body.channel);
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
   if (!info) return send(res, 400, { error: 'Unknown conversation' });
@@ -780,17 +801,18 @@ async function handleCreateGroup(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const ownerId = cleanText(body.id, 64);
-  const ownerName = cleanText(body.name, MAX_NAME) || 'Anonymous';
+  const ownerId = req.auth.id;
+  const ownerName = req.auth.name;
   const name = cleanText(body.nameValue ?? body.groupName, MAX_GROUP_NAME);
   if (!ownerId) return send(res, 400, { error: 'Missing sender id' });
   if (!name) return send(res, 400, { error: 'Group needs a name' });
 
+  if(groups.size>=1000) return send(res,429,{error:'Group capacity reached'});
   const members = new Set([ownerId]);
   const requested = Array.isArray(body.members) ? body.members : [];
   for (const memberId of requested.slice(0, MAX_GROUP_MEMBERS)) {
     const id = cleanText(memberId, 64);
-    if (id) members.add(id);
+    if (id && lookupUser(id)?.username) members.add(id);
   }
   if (members.size < 2) return send(res, 400, { error: 'Pick at least one other person' });
 
@@ -814,11 +836,12 @@ async function handleCreateRoom(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.id, 64);
+  const userId = req.auth.id;
   const name = cleanText(body.name ?? body.roomName ?? body.nameValue, MAX_GROUP_NAME);
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
   if (!name) return send(res, 400, { error: 'Room needs a name' });
 
+  if(rooms.size>=1000) return send(res,429,{error:'Room capacity reached'});
   const room = {
     id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
     name,
@@ -836,7 +859,7 @@ async function handlePin(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.userId ?? body.id, 64);
+  const userId = req.auth.id;
   const info = parseChannel(body.channel);
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
   if (!info) return send(res, 400, { error: 'Unknown conversation' });
@@ -870,7 +893,7 @@ function searchableConversations(userId, channel) {
 
 function handleSearch(req, res) {
   const url = new URL(req.url, 'http://localhost');
-  const userId = cleanText(url.searchParams.get('id'), 64);
+  const userId = req.auth.id;
   const query = cleanText(url.searchParams.get('q'), 160).toLowerCase();
   const channel = cleanText(url.searchParams.get('channel'), 160);
   if (!query) return send(res, 200, { results: [], query: '' });
@@ -929,7 +952,7 @@ function sendExport(res, body, type, filename) {
 
 function handleExport(req, res) {
   const url = new URL(req.url, 'http://localhost');
-  const userId = cleanText(url.searchParams.get('id'), 64);
+  const userId = req.auth.id;
   const format = url.searchParams.get('format') === 'html' ? 'html' : 'json';
   const info = parseChannel(url.searchParams.get('channel'));
   if (!info) return send(res, 400, { error: 'Unknown conversation' });
@@ -1012,8 +1035,9 @@ async function handleReactions(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.userId, 64);
+  const userId = req.auth.id;
   const emoji = cleanText(body.emoji, 24);
+  if (!ALLOWED_REACTIONS.has(emoji)) return send(res, 400, { error: 'Unsupported reaction' });
   const action = body.action === 'remove' ? 'remove' : 'add';
   const info = parseChannel(body.channel);
 
@@ -1025,7 +1049,8 @@ async function handleReactions(req, res) {
   if (!message) return send(res, 404, { error: 'Message not found' });
 
   message.reactions = message.reactions || {};
-  const list = message.reactions[emoji] || [];
+  const list = Object.hasOwn(message.reactions, emoji) && Array.isArray(message.reactions[emoji])
+    ? message.reactions[emoji] : [];
   if (action === 'add') {
     if (!list.includes(userId)) list.push(userId);
   }
@@ -1042,7 +1067,7 @@ async function handleReadReceipt(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.userId, 64);
+  const userId = req.auth.id;
   const messageIdValue = cleanText(body.messageId, 64);
   const info = parseChannel(body.channel);
   if (!userId || !messageIdValue) return send(res, 400, { error: 'Missing required fields' });
@@ -1064,7 +1089,7 @@ async function handleTyping(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.userId, 64);
+  const userId = req.auth.id;
   const info = parseChannel(body.channel);
   if (!userId) return send(res, 400, { error: 'Missing user id' });
   if (!info) return send(res, 400, { error: 'Unknown conversation' });
@@ -1079,6 +1104,7 @@ async function handleTyping(req, res) {
 /* ---------- Call signalling (WebRTC) ---------- */
 
 const SIGNAL_TYPES = new Set(['offer', 'answer', 'ice', 'hangup', 'decline', 'busy']);
+const ALLOWED_REACTIONS = new Set(['👍', '❤️', '😂', '😮', '😢', '🎉', '🔥', '👀', '✅', '🙏']);
 
 function callsFor(userId) {
   const entries = callHistory.get(userId) || [];
@@ -1167,8 +1193,8 @@ async function handleSignal(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const fromId = cleanText(body.fromId, 64);
-  const fromName = cleanText(body.fromName, MAX_NAME) || 'Anonymous';
+  const fromId = req.auth.id;
+  const fromName = req.auth.name;
   const toId = cleanText(body.toId, 64);
   const callId = cleanText(body.callId, 64);
   const type = cleanText(body.type, 16);
@@ -1177,7 +1203,18 @@ async function handleSignal(req, res) {
   if (!callId) return send(res, 400, { error: 'Missing call id' });
   if (!SIGNAL_TYPES.has(type)) return send(res, 400, { error: 'Unknown signal type' });
 
-  const online = [...clients.values()].some((client) => client.userId === toId);
+  if (fromId === toId || !lookupUser(toId)?.username) return send(res,400,{error:'Invalid call recipient'});
+  const record = callSessions.get(callId);
+  if (record && !((record.fromId===fromId && record.toId===toId) || (record.toId===fromId && record.fromId===toId))) return send(res,403,{error:'Not a call participant'});
+  if (!record && type !== 'offer') return send(res,404,{error:'Unknown call'});
+  if (record && type==='offer' && record.fromId!==fromId) return send(res,403,{error:'Only the caller can renegotiate'});
+  if (record && ['decline','busy'].includes(type) && record.state!=='ringing') return send(res,409,{error:'Call is already active'});
+  if (record?.endedAt) return send(res,409,{error:'Call already ended'});
+  if (record && ['answer','decline','busy'].includes(type) && record.toId!==fromId) return send(res,403,{error:'Only the recipient can answer this call'});
+  if (['offer','answer'].includes(type) && (!body.data || typeof body.data !== 'object' || body.data.type!==type || typeof body.data.sdp!=='string' || !body.data.sdp.startsWith('v=0'))) return send(res,400,{error:'Invalid session description'});
+  if (type==='ice' && (!body.data || typeof body.data!=='object' || typeof body.data.candidate!=='string' || body.data.candidate.length>4096)) return send(res,400,{error:'Invalid ICE candidate'});
+  if (!record && callSessions.size>=2000) return send(res,429,{error:'Call capacity reached'});
+  const online = [...clients.values()].some((client) => liveClient(client) && client.userId === toId);
   if (!online) return send(res, 409, { error: 'That device is not online' });
 
   rememberUser(fromId, { name: fromName });
@@ -1193,32 +1230,130 @@ async function handleSignal(req, res) {
   send(res, 200, { ok: true });
 }
 
+// Registration and login are deliberately separate from the legacy chat routes.
+// Never trust id/name/fromId/userId values provided by the browser.
+const loginAttempts = new Map();
+function rateLimit(req, kind, max, interval) {
+  const key = `${kind}:${req.auth?.id || req.socket.remoteAddress || ''}`;
+  for (const [key,value] of loginAttempts) if(value.expires <= Date.now()) loginAttempts.delete(key);
+  if(loginAttempts.size >= 10000 && !loginAttempts.has(key)) return false;
+  const now = Date.now();
+  const old = loginAttempts.get(key);
+  const record = old && old.expires > now ? old : { count: 0, expires: now + interval };
+  record.count++;
+  loginAttempts.set(key, record);
+  return record.count <= max;
+}
+function clearLoginAttempts() { /* Keep the IP budget across successful logins. */ }
+function sessionCookie(req, token, maxAge) {
+  const secure = req.socket.encrypted ? '; Secure' : '';
+  return `cb_session=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`;
+}
+function requireSecureLogin(req, res) {
+  const ip = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (req.socket.encrypted || ip === '127.0.0.1' || ip === '::1') return true;
+  send(res, 426, { error: 'Use HTTPS to register or log in from another device on the LAN.' });
+  return false;
+}
+function sessionResponse(req, res, user) {
+  const session = createSession(user);
+  rememberUser(user.user_id, { name: user.name });
+  send(res, 200, { ok: true, user: publicUser(user), csrfToken: session.csrfToken }, {
+    'Set-Cookie': sessionCookie(req, session.token, 7 * 24 * 60 * 60),
+    'Cache-Control': 'no-store',
+  });
+}
+async function handleRegister(req, res) {
+  if (!requireSecureLogin(req, res)) return;
+  if (!rateLimit(req, 'register', 10, 60 * 60 * 1000)) return send(res, 429, { error: 'Too many registrations. Try again later.' });
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+  const name = normalizeName(body.name);
+  const username = normalizeUsername(body.username);
+  if (!name) return send(res, 400, { error: 'Name must contain 2–24 valid characters.' });
+  if (!username) return send(res, 400, { error: 'Username must be 3–24 lowercase letters, numbers, dots or underscores.' });
+  if (!validPassword(body.password)) return send(res, 400, { error: 'Password must have 8–128 characters.' });
+  try {
+    const user = await registerUser(name, username, body.password);
+    sessionResponse(req, res, user);
+  } catch (err) {
+    if (String(err.message).includes('UNIQUE constraint failed')) return send(res, 409, { error: 'Username is already taken.' });
+    throw err;
+  }
+}
+async function handleLogin(req, res) {
+  if (!requireSecureLogin(req, res)) return;
+  if (!rateLimit(req, 'login', 7, 15 * 60 * 1000)) return send(res, 429, { error: 'Too many login attempts. Try again later.' });
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+  const username = normalizeUsername(body.username);
+  if (!username || typeof body.password !== 'string' || body.password.length > 128) {
+    return send(res, 401, { error: 'Invalid username or password.' });
+  }
+  const user = await loginUser(username, body.password);
+  if (!user) return send(res, 401, { error: 'Invalid username or password.' });
+  clearLoginAttempts(req);
+  sessionResponse(req, res, user);
+}
+function handleLogout(req, res) {
+  for(const record of callSessions.values()) {
+    if(!record.endedAt && [record.fromId,record.toId].includes(req.auth.id)) {
+      const toId=record.fromId===req.auth.id?record.toId:record.fromId;
+      writeToUser(toId,'signal',{fromId:req.auth.id,fromName:req.auth.name,toId,callId:record.callId,type:'hangup',data:null});
+      finishCallRecord(record.callId,'hangup');
+    }
+  }
+  invalidateSession(req.auth.sessionId);
+  for (const client of clients.values()) {
+    if (client.sessionId === req.auth.sessionId) client.res.end();
+  }
+  send(res, 200, { ok: true }, {
+    'Set-Cookie': sessionCookie(req, '', 0),
+    'Cache-Control': 'no-store',
+  });
+}
+function validCsrf(req) {
+  const supplied = req.headers['x-csrf-token'];
+  if (typeof supplied !== 'string' || !/^[a-f0-9]{64}$/.test(supplied)) return false;
+  return timingSafeEqual(Buffer.from(supplied), Buffer.from(req.auth.csrfToken));
+}
+
 function requestHandler(req, res) {
-  const pathname = new URL(req.url, 'http://localhost').pathname;
-
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
-      'Access-Control-Allow-Headers': 'Content-Type',
-      'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Max-Age': '86400',
-    });
-    return res.end();
+  let pathname;
+  try { pathname = new URL(req.url, 'http://localhost').pathname; } catch { return send(res,400,{error:'Invalid request URL'}); }
+  if (pathname.startsWith('/api/') && req.method==='POST' && pathname!=='/api/files' && !/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) return send(res,415,{error:'Expected application/json'});
+  const origin = req.headers.origin;
+  if (origin && origin !== `${scheme}://${req.headers.host}`) {
+    return send(res, 403, { error: 'Cross-origin requests are not allowed.' });
   }
-
-  if (req.method === 'GET' && pathname === '/events') return handleEvents(req, res);
+  if (req.method === 'OPTIONS') return send(res, 405, { error: 'Cross-origin requests are not supported.' });
+  if (req.method === 'POST' && pathname === '/api/auth/register') return handleRegister(req, res);
+  if (req.method === 'POST' && pathname === '/api/auth/login') return handleLogin(req, res);
   if (req.method === 'GET' && pathname === '/api/health') {
+    return send(res, 200, { ok: true, status: 'running' });
+  }
+  // A signed-out visitor is a normal state, not a failed protected request.
+  if (req.method === 'GET' && pathname === '/api/auth/session') {
+    if (!requireSecureLogin(req, res)) return;
+    const session = authenticateRequest(req);
     return send(res, 200, {
-      ok: true,
-      clients: clients.size,
-      messages: generalHistory.length,
-      dms: dmHistory.size,
-      groups: groups.size,
-      rooms: rooms.size,
-      calls: callSessions.size,
-      files: files.size,
+      user: session ? { id: session.id, name: session.name, username: session.username } : null,
+      csrfToken: session?.csrfToken || null,
     });
   }
+  if (pathname === '/events' || pathname.startsWith('/api/')) {
+    req.auth = authenticateRequest(req);
+    if (!req.auth) return send(res, 401, { error: 'Please log in.' });
+    if (!requireSecureLogin(req,res)) return;
+    const limit = pathname === '/api/files' ? 20 : pathname === '/api/signal' ? 600 : 240;
+    if(!rateLimit(req, pathname === '/api/files' ? 'files' : pathname === '/api/signal' ? 'signals' : 'api',limit,60000)) return send(res,429,{error:'Too many requests. Try again shortly.'}, {'Retry-After':'60'});
+    if (req.method === 'POST' && !validCsrf(req)) return send(res, 403, { error: 'Invalid session security token.' });
+  }
+  if (req.method === 'GET' && pathname === '/api/auth/me') {
+    return send(res, 200, { user: { id: req.auth.id, name: req.auth.name, username: req.auth.username }, csrfToken: req.auth.csrfToken }, { 'Cache-Control': 'no-store' });
+  }
+  if (req.method === 'POST' && pathname === '/api/auth/logout') return handleLogout(req, res);
+  if (req.method === 'GET' && pathname === '/events') return handleEvents(req, res);
   if (req.method === 'POST' && pathname === '/api/messages') return handleSend(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/edit') return handleEdit(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/delete') return handleDelete(req, res);
@@ -1234,7 +1369,7 @@ function requestHandler(req, res) {
   if (req.method === 'GET' && pathname === '/api/export') return handleExport(req, res);
   if (req.method === 'GET' && pathname === '/api/calls') {
     const url = new URL(req.url, 'http://localhost');
-    const userId = cleanText(url.searchParams.get('id'), 64);
+    const userId = req.auth.id;
     if (!userId) return send(res, 400, { error: 'Missing user id' });
     return send(res, 200, { calls: callsFor(userId) });
   }
@@ -1251,24 +1386,36 @@ function requestHandler(req, res) {
   return send(res, 405, { error: 'Method not allowed' });
 }
 
+function safeRequestHandler(req, res) {
+  Promise.resolve().then(() => requestHandler(req, res)).catch((error) => {
+    console.error('Request failed:', error);
+    if (res.headersSent) res.destroy();
+    else send(res, error.status || 500, { error: error.status ? error.message : 'Internal server error' });
+  });
+}
+
 let server;
 if (USE_HTTPS) {
   try {
     server = https.createServer(
       { cert: fs.readFileSync(tlsCertPath), key: fs.readFileSync(tlsKeyPath) },
-      requestHandler,
+      safeRequestHandler,
     );
   } catch (error) {
     console.error(`Could not start HTTPS. Missing or unreadable TLS certificate/key.\n  cert: ${tlsCertPath}\n  key:  ${tlsKeyPath}\n${error.message}`);
     process.exit(1);
   }
 } else {
-  server = http.createServer(requestHandler);
+  server = http.createServer(safeRequestHandler);
 }
 
 setInterval(() => {
-  for (const client of clients.values()) client.res.write(': ping\n\n');
+  for (const client of clients.values()) {
+    if (liveClient(client)) client.res.write(': ping\n\n');
+  }
 }, 25_000).unref();
+
+setInterval(cleanupSessions, 10 * 60 * 1000).unref();
 
 setInterval(() => {
   for (const channel of [...typing.keys()]) {
@@ -1279,6 +1426,8 @@ setInterval(() => {
   }
 }, 2500).unref();
 
+server.requestTimeout=30000;
+server.headersTimeout=15000;
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`Port ${PORT} is already in use. Start with a different port, e.g. PORT=3001 npm start`);
@@ -1298,6 +1447,7 @@ server.listen(PORT, HOST, () => {
   console.log(`  On this machine:  ${scheme}://localhost:${PORT}`);
   for (const address of addresses) console.log(`  On the LAN:       ${scheme}://${address}:${PORT}`);
   if (USE_HTTPS) console.log('\n  The certificate is self-signed unless you supplied your own. Accept the browser warning once per device.');
+  else console.log('\n  LAN registration and login require HTTPS. Run "npm run start:https" and open its HTTPS address.');
   if (addresses.length === 0) console.log('  No LAN address found — check your network connection.');
   console.log('\nPress Ctrl+C to stop.');
 });

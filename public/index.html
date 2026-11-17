@@ -48,9 +48,9 @@
         <div class="sidebar-footer">
           <div class="me">You are <strong id="me-name">—</strong></div>
           <div class="sidebar-actions">
-            <button type="button" id="change-name" class="ghost">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4L20 8l-4-4L4 16v4Z" /></svg>
-              Name
+            <button type="button" id="change-name" class="ghost" title="Log out of this account">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
+              Log out
             </button>
             <button type="button" id="copy-link" class="ghost">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 15l6-6M8 12l-2 2a3 3 0 0 0 4 4l2-2M16 12l2-2a3 3 0 0 0-4-4l-2 2" /></svg>
@@ -223,15 +223,26 @@
     </div>
 
     <div id="name-dialog" class="overlay" hidden>
-      <form id="name-form" class="card" role="dialog" aria-modal="true" aria-labelledby="name-title">
+      <form id="name-form" class="card auth-card" role="dialog" aria-modal="true" aria-labelledby="name-title">
         <img class="card-mark" src="/logo.svg" alt="" width="56" height="56" />
-        <h1 id="name-title">Welcome to Chatterbox</h1>
-        <p>Set your nickname and optional full name. Your IP address and device are shared publicly as credentials.</p>
-        <label class="field-label" for="name-input">Nickname / username</label>
-        <input id="name-input" maxlength="24" placeholder="Nickname" autocomplete="nickname" required />
-        <label class="field-label" for="full-name-input">Full name (optional)</label>
-        <input id="full-name-input" maxlength="60" placeholder="Full name" autocomplete="name" />
-        <button type="submit">Start chatting</button>
+        <h1 id="name-title">Log in to Chatterbox</h1>
+        <p id="auth-subtitle">Use your username and password to continue chatting.</p>
+        <div id="registration-fields" hidden>
+          <label class="field-label" for="name-input">Name</label>
+          <input id="name-input" type="text" minlength="2" maxlength="24" placeholder="e.g. John Cruz" autocomplete="name" disabled />
+        </div>
+        <label class="field-label" for="username-input">Username</label>
+        <input id="username-input" autocapitalize="none" spellcheck="false" type="text" minlength="3" maxlength="24" pattern="[A-Za-z0-9_.]{3,24}" title="3–24 letters, numbers, dots or underscores" placeholder="e.g. johncruz" autocomplete="username" required />
+        <label class="field-label" for="password-input">Password</label>
+        <div class="password-field">
+          <input id="password-input" type="password" minlength="8" maxlength="128" placeholder="At least 8 characters" autocomplete="current-password" required />
+          <button type="button" id="password-visibility" class="icon" aria-label="Show password" title="Show password" aria-controls="password-input" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></svg>
+          </button>
+        </div>
+        <div class="form-error" id="auth-error" role="alert" hidden></div>
+        <button id="auth-submit" type="submit">Log in</button>
+        <button id="auth-toggle" type="button" class="secondary auth-toggle">No account? Create one</button>
       </form>
     </div>
 
