@@ -564,6 +564,7 @@ function updateHeader(conversation) {
 
 function messagePreview(message) {
   if (!message) return 'No messages yet';
+  if (message.deleted) return `${message.name} unsent a message`;
   if (message.kind === 'file') return `📎 ${message.file?.name || 'Attachment'}`;
   return message.text || '';
 }
@@ -723,6 +724,13 @@ function buildMessageRow(message, conversation, previous) {
   }
 
   const body = make('div', 'msg-body');
+
+  if (message.deleted) {
+    row.classList.add('is-unsent');
+    body.append(make('div', 'msg-unsent', `'${message.name}' unsent a message`));
+    row.append(body);
+    return row;
+  }
 
   if (!grouped) {
     const head = make('div', 'msg-head');
@@ -1286,6 +1294,16 @@ function startEdit(message) {
   els.input.setSelectionRange(els.input.value.length, els.input.value.length);
 }
 
+function markMessageDeleted(message) {
+  message.deleted = true;
+  message.text = '';
+  message.kind = 'deleted';
+  message.file = null;
+  message.replyTo = null;
+  message.reactions = null;
+  message.pinnedAt = null;
+}
+
 async function deleteMessage(message, conversation) {
   if (!window.confirm('Delete this message? This cannot be undone.')) return;
   try {
@@ -1294,7 +1312,8 @@ async function deleteMessage(message, conversation) {
       channel: conversation.id,
       messageId: message.id,
     });
-    conversation.history = (conversation.history || []).filter((entry) => entry.id !== message.id);
+    const target = (conversation.history || []).find((entry) => entry.id === message.id);
+    if (target) markMessageDeleted(target);
     if (conversation.id === activeId) renderMessages({ scroll: false });
     renderChannels();
     if (editingId === message.id) clearComposerState();
@@ -1582,7 +1601,9 @@ function handleIncomingMessage(message) {
 function handleMessageDelete(data) {
   const conversation = getConversation(data.channel);
   if (!conversation) return;
-  conversation.history = (conversation.history || []).filter((message) => message.id !== data.id);
+  const message = (conversation.history || []).find((entry) => entry.id === data.id);
+  if (message) markMessageDeleted(message);
+  else conversation.history = (conversation.history || []).filter((entry) => entry.id !== data.id);
   if (conversation.id === activeId) renderMessages({ scroll: false });
   renderChannels();
 }
@@ -2201,6 +2222,24 @@ function connect() {
   source = new EventSource(apiUrl(`/events?${params}`));
 
   source.addEventListener('open', () => setStatus(`Connected · ${location.host}`, 'connected'));
+
+  source.addEventListener('name-taken', (event) => {
+    let taken = '';
+    try {
+      taken = JSON.parse(event.data).name || '';
+    } catch {
+      // Ignore malformed payloads.
+    }
+    source.close();
+    source = null;
+    me.name = '';
+    me.fullName = '';
+    localStorage.removeItem(NAME_KEY);
+    localStorage.removeItem(FULL_NAME_KEY);
+    setStatus('Choose another name.', 'error');
+    toast(`The name "${taken || 'you picked'}" is already in use. Pick a different one.`, 'error');
+    askForName(true);
+  });
 
   source.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);

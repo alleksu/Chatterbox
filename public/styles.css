@@ -1130,6 +1130,15 @@ svg {
   font-style: italic;
 }
 
+.msg-unsent {
+  padding: 7px 14px;
+  border-radius: 16px;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 13.5px;
+  font-style: italic;
+}
+
 .msg-status {
   color: var(--muted);
   font-weight: 600;

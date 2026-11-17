@@ -166,6 +166,17 @@ function onlineUsers() {
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function nameTakenBy(name, userId) {
+  const key = String(name || '').trim().toLowerCase();
+  if (!key) return false;
+  for (const client of clients.values()) {
+    if (!client.userId || client.userId === userId) continue;
+    const other = userProfile(client.userId).name || client.name || '';
+    if (other.trim().toLowerCase() === key) return true;
+  }
+  return false;
+}
+
 function broadcast(event, data) {
   const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of clients.values()) client.res.write(payload);
@@ -582,6 +593,19 @@ function handleEvents(req, res) {
   const ip = clientIp(req);
   const device = summarizeDevice(req.headers['user-agent']);
   const credentials = buildCredentials(ip, device);
+
+  if (nameTakenBy(name, userId)) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'Access-Control-Allow-Origin': process.env.CORS_ORIGIN || '*',
+    });
+    res.write(`event: name-taken\ndata: ${JSON.stringify({ name })}\n\n`);
+    res.end();
+    return;
+  }
+
   rememberUser(userId, { name, fullName, ip, device, credentials });
 
   res.writeHead(200, {
@@ -768,11 +792,23 @@ async function handleDelete(req, res) {
 
   const message = history[index];
   if (message.userId !== userId) return send(res, 403, { error: 'You can only delete your own messages' });
+  if (message.deleted) return send(res, 200, { ok: true });
 
   if (message.kind === 'file' && message.file?.id) deleteFileRecord(message.file.id);
-  history.splice(index, 1);
 
-  deliverToChannel(info, 'message-delete', { channel: channelIdFor(info), id });
+  // Keep a tombstone so everyone sees that this message was unsent.
+  message.deleted = true;
+  message.deletedAt = Date.now();
+  message.text = '';
+  message.kind = 'deleted';
+  message.file = null;
+  message.replyTo = null;
+  message.mentions = [];
+  message.reactions = null;
+  message.pinnedAt = null;
+  message.pinnedBy = null;
+
+  deliverToChannel(info, 'message-delete', { channel: channelIdFor(info), id, name: message.name, userId });
   send(res, 200, { ok: true });
 }
 
