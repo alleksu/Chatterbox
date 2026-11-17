@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import dgram from 'node:dgram';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -21,13 +22,19 @@ const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
 const TYPING_TTL = 6000;
 const MAX_SEARCH_RESULTS = 60;
 const MAX_CALL_HISTORY = 50;
+const STUN_PORT = Number(process.env.STUN_PORT) || 3478;
+const STUN_MAGIC_COOKIE = 0x2112a442;
 
 const appDir = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.join(appDir, 'public');
 const filesDir = path.join(os.tmpdir(), `chatterbox-files-${PORT}`);
-const USE_HTTPS = process.env.HTTPS === '1' || String(process.env.HTTPS).toLowerCase() === 'true';
 const tlsCertPath = path.resolve(process.env.TLS_CERT || path.join(appDir, 'certs', 'cert.pem'));
 const tlsKeyPath = path.resolve(process.env.TLS_KEY || path.join(appDir, 'certs', 'key.pem'));
+const hasLocalCerts = fs.existsSync(tlsCertPath) && fs.existsSync(tlsKeyPath);
+const httpsSetting = process.env.HTTPS;
+const USE_HTTPS = httpsSetting === undefined || httpsSetting === ''
+  ? hasLocalCerts
+  : httpsSetting === '1' || String(httpsSetting).toLowerCase() === 'true';
 const scheme = USE_HTTPS ? 'https' : 'http';
 
 fs.mkdirSync(filesDir, { recursive: true });
@@ -625,7 +632,14 @@ function handleEvents(req, res) {
     users: onlineUsers(),
     mentions: mentionsFor(userId),
     calls: callsFor(userId),
-    config: { maxFileMB: MAX_FILE_MB, maxText: MAX_TEXT, maxName: MAX_NAME, maxFullName: MAX_FULL_NAME, maxGroupName: MAX_GROUP_NAME },
+    config: {
+      maxFileMB: MAX_FILE_MB,
+      maxText: MAX_TEXT,
+      maxName: MAX_NAME,
+      maxFullName: MAX_FULL_NAME,
+      maxGroupName: MAX_GROUP_NAME,
+      stunPort: process.env.STUN_PORT === '0' ? 0 : STUN_PORT,
+    },
   };
   res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
   broadcast('presence', { users: onlineUsers() });
@@ -1321,6 +1335,50 @@ function requestHandler(req, res) {
   if (req.method === 'GET' || req.method === 'HEAD') return serveStatic(req, res, pathname);
   return send(res, 405, { error: 'Method not allowed' });
 }
+
+function startStunServer() {
+  if (process.env.STUN_PORT === '0') return;
+  const socket = dgram.createSocket('udp4');
+  socket.on('error', (error) => {
+    console.warn(`STUN disabled: ${error.message}`);
+    try {
+      socket.close();
+    } catch {
+      // Already closed.
+    }
+  });
+  socket.on('message', (msg, rinfo) => {
+    if (msg.length < 20) return;
+    if (msg.readUInt16BE(0) !== 0x0001) return;
+    if (msg.readUInt32BE(4) !== STUN_MAGIC_COOKIE) return;
+    if (process.env.DEBUG_STUN) console.log(`STUN request from ${rinfo.address}:${rinfo.port} (${msg.length} bytes)`);
+
+    const response = Buffer.alloc(32);
+    response.writeUInt16BE(0x0101, 0);
+    response.writeUInt16BE(12, 2);
+    response.writeUInt32BE(STUN_MAGIC_COOKIE, 4);
+    msg.copy(response, 8, 8, 20);
+    response.writeUInt16BE(0x0020, 20);
+    response.writeUInt16BE(8, 22);
+    response[24] = 0;
+    response[25] = 0x01;
+    response.writeUInt16BE(rinfo.port ^ (STUN_MAGIC_COOKIE >>> 16), 26);
+    const octets = rinfo.address.split('.').map(Number);
+    const address = ((octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3]) >>> 0;
+    response.writeUInt32BE((address ^ STUN_MAGIC_COOKIE) >>> 0, 28);
+
+    try {
+      socket.send(response, rinfo.port, rinfo.address);
+    } catch {
+      // Ignore replies to unreachable clients.
+    }
+  });
+  socket.bind(STUN_PORT, '0.0.0.0', () => {
+    console.log(`STUN listening on UDP ${STUN_PORT} for direct call connections.`);
+  });
+}
+
+startStunServer();
 
 let server;
 if (USE_HTTPS) {

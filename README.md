@@ -10,25 +10,26 @@ npm start
 
 If PowerShell blocks `npm.ps1` ("running scripts is disabled on this system"), use `npm.cmd start` or `node server.js`.
 
-The server binds to `0.0.0.0` and prints the addresses to open:
+The server binds to `0.0.0.0` and prints the addresses to open. When `certs/cert.pem` and `certs/key.pem` exist it starts with HTTPS automatically:
 
 ```
-  On this machine:  http://localhost:3000
-  On the LAN:       http://192.168.1.23:3000
+  On this machine:  https://localhost:3000
+  On the LAN:       https://192.168.1.23:3000
 ```
 
 Open the LAN address on any phone, tablet or computer connected to the same network, pick a name, and chat. Use **Invite** in the sidebar to copy the address and share it.
 
 ## HTTPS for phone calls
 
-Browsers only allow microphone, camera, screen sharing, service workers, and install prompts on secure origins. `http://localhost` is secure, but `http://<LAN-IP>` is not. For calls from a phone, generate a local certificate and start with HTTPS:
+Browsers only allow microphone, camera, screen sharing, service workers, and install prompts on secure origins. `http://localhost` is secure, but `http://<LAN-IP>` is not. Generate a local certificate once:
 
 ```bash
 npm run cert
-npm run start:https
 ```
 
-Use `npm.cmd run cert` / `npm.cmd run start:https` if PowerShell blocks npm scripts. The certificate script uses OpenSSL (Git for Windows includes it) and creates `certs/cert.pem` and `certs/key.pem` with `localhost` and your current LAN addresses. Open the printed `https://` address and accept the self-signed certificate warning once per device.
+Use `npm.cmd run cert` if PowerShell blocks npm scripts. The certificate script uses OpenSSL (Git for Windows includes it) and creates `certs/cert.pem` and `certs/key.pem` with `localhost` and your current LAN addresses. After that, `npm start` serves HTTPS automatically. Open the printed `https://` address and accept the self-signed certificate warning once per device. Re-run `npm run cert` if your LAN IP changes.
+
+To force HTTPS or HTTP explicitly, use `npm run start:https`, `HTTPS=1 node server.js`, or `HTTPS=0 node server.js`.
 
 You can also supply your own certificate:
 
@@ -94,7 +95,7 @@ State is kept in memory, so history (last 300 messages per conversation), DMs, g
 
 ## Notes
 
-- If other devices cannot connect, allow Node through the firewall on the port you use (private networks on Windows, for example) and make sure the network does not isolate clients from each other.
+- If other devices cannot connect, allow Node through the firewall on the web port and UDP `3478` (private networks on Windows, for example) and make sure the network does not isolate clients from each other. The built-in STUN responder on UDP `3478` helps calls find each other; set `STUN_PORT=0` to disable it, or `STUN_PORT=<port>` to change it.
 - Use HTTPS for calls, screen sharing, notifications, and installation from phones. Self-signed certificates require accepting a browser warning once on each device.
 - Chatterbox has no authentication. Anyone on the LAN who knows the address can read and post messages and can access public rooms. Run it only on networks you trust.
 - To use it over the internet, put it behind a reverse proxy with TLS; do not expose the port directly.

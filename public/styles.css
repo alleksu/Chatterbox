@@ -656,6 +656,8 @@ svg {
 }
 
 .topbar {
+  position: relative;
+  z-index: 10;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -757,6 +759,17 @@ svg {
 .icon svg {
   width: 17px;
   height: 17px;
+}
+
+.icon.danger-item,
+.icon.danger-item svg {
+  color: var(--danger);
+}
+
+.icon.danger-item:hover {
+  background: rgba(255, 122, 133, 0.12);
+  border-color: rgba(255, 122, 133, 0.4);
+  color: var(--danger);
 }
 
 .icon.tiny {

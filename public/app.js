@@ -100,14 +100,10 @@ const els = {
   pinsClose: document.getElementById('pins-close'),
   chatMenu: document.getElementById('chat-menu'),
   chatMenuPanel: document.getElementById('chat-menu-panel'),
-  menuSearch: document.getElementById('menu-search'),
-  menuPins: document.getElementById('menu-pins'),
   menuMembers: document.getElementById('menu-members'),
-  menuLeaveGroup: document.getElementById('menu-leave-group'),
-  menuExportHtml: document.getElementById('menu-export-html'),
-  menuExportJson: document.getElementById('menu-export-json'),
   menuCalls: document.getElementById('menu-calls'),
   menuDevices: document.getElementById('menu-devices'),
+  leaveChat: document.getElementById('leave-chat'),
   searchDialog: document.getElementById('search-dialog'),
   globalSearchInput: document.getElementById('global-search-input'),
   globalSearchStatus: document.getElementById('global-search-status'),
@@ -587,7 +583,7 @@ function updateHeader(conversation) {
     updateCallButtons(null);
     updatePinCount();
     els.menuMembers.hidden = true;
-    els.menuLeaveGroup.hidden = true;
+    els.leaveChat.hidden = true;
     return;
   }
 
@@ -595,7 +591,7 @@ function updateHeader(conversation) {
   els.roomTitle.textContent = conversation.name;
   els.roomIcon.className = `room-icon ${conversation.type}`;
   els.menuMembers.hidden = conversation.type === 'dm';
-  els.menuLeaveGroup.hidden = conversation.type !== 'group';
+  els.leaveChat.hidden = conversation.type !== 'group';
   if (conversation.type === 'dm') {
     els.roomIcon.textContent = initials(conversation.name);
     els.roomIcon.style.background = avatarColor(conversation.name);
@@ -1749,11 +1745,32 @@ function applyConversations(incoming) {
 
 const RTC_CONFIG = { iceServers: [] };
 const RING_TIMEOUT = 35_000;
+const CONNECT_TIMEOUT = 15_000;
 
 let call = null;
 let callTimerId = null;
 let ringInterval = null;
 let ringCtx = null;
+const earlyIce = new Map();
+
+function configureRtc(config) {
+  const port = Number(config?.stunPort);
+  if (!port) return;
+  let host = location.hostname;
+  if (SERVER_URL) {
+    try {
+      host = new URL(SERVER_URL, location.href).hostname;
+    } catch {
+      // Fall back to the page host.
+    }
+  }
+  if (!host) return;
+  if (host.includes(':') && !host.startsWith('[')) host = `[${host}]`;
+  const urls = `stun:${host}:${port}`;
+  if (!RTC_CONFIG.iceServers.some((entry) => entry.urls === urls)) {
+    RTC_CONFIG.iceServers.push({ urls });
+  }
+}
 
 function mediaConstraints(withVideo) {
   const audio = settings.mic ? { deviceId: { ideal: settings.mic } } : true;
@@ -1782,6 +1799,24 @@ function armRingTimeout() {
     endCall(role === 'callee' ? 'Missed call' : 'No answer', role === 'callee' ? 'decline' : 'hangup');
     toast(role === 'callee' ? 'Missed call' : 'No answer');
   }, RING_TIMEOUT);
+}
+
+function armConnectTimeout() {
+  const current = call;
+  if (!current || current.connectTimeout) return;
+  current.connectTimeout = setTimeout(() => {
+    if (!call || call !== current) return;
+    if (current.pc?.connectionState === 'connected') return;
+    endCall('Call could not connect', 'hangup');
+    toast('Call could not connect. Check that both devices can reach each other on this network.', 'error');
+  }, CONNECT_TIMEOUT);
+}
+
+function clearConnectTimeout(current = call) {
+  if (current?.connectTimeout) {
+    clearTimeout(current.connectTimeout);
+    current.connectTimeout = null;
+  }
 }
 
 function newCallId() {
@@ -1890,18 +1925,42 @@ function renderCallUi() {
   els.callRemoteVideo.hidden = !showVideo;
   els.callLocalVideo.hidden = !showVideo;
   els.callAvatar.hidden = showVideo;
-  els.callTimer.hidden = !active;
+  els.callTimer.hidden = !call.startedAt;
 
   if (incoming) {
     els.callStatus.textContent = call.withVideo ? 'Incoming video call…' : 'Incoming call…';
   } else if (call.state === 'outgoing') {
     els.callStatus.textContent = call.withVideo ? 'Starting video call…' : 'Calling…';
   } else {
-    els.callStatus.textContent = call.withVideo ? 'Video call' : 'Audio call';
-    if (call.remoteStream) {
-      const media = call.withVideo ? els.callRemoteVideo : els.callRemoteAudio;
-      media.play().catch(() => {});
+    const connected = call.pc?.connectionState === 'connected';
+    if (mediaBlocked) {
+      els.callStatus.textContent = 'Tap the screen to enable audio/video';
+    } else {
+      els.callStatus.textContent = !call.startedAt || !connected
+        ? 'Connecting media…'
+        : call.withVideo ? 'Video call' : 'Audio call';
     }
+    if (call.remoteStream) resumeCallMedia();
+  }
+}
+
+let mediaBlocked = false;
+
+async function resumeCallMedia() {
+  const current = call;
+  if (!current) return;
+  const media = current.withVideo ? els.callRemoteVideo : els.callRemoteAudio;
+  if (!media.srcObject) return;
+  try {
+    await media.play();
+    if (mediaBlocked && call) {
+      mediaBlocked = false;
+      renderCallUi();
+    }
+  } catch {
+    if (!call) return;
+    mediaBlocked = true;
+    if (call.state === 'active') els.callStatus.textContent = 'Tap the screen to enable audio/video';
   }
 }
 
@@ -1909,15 +1968,12 @@ function attachRemoteStream() {
   if (!call || !call.remoteStream) return;
   const stream = call.remoteStream;
   if (call.withVideo) {
-    if (els.callRemoteVideo.srcObject !== stream) {
-      els.callRemoteVideo.srcObject = stream;
-      els.callRemoteVideo.play().catch(() => {});
-    }
+    if (els.callRemoteVideo.srcObject !== stream) els.callRemoteVideo.srcObject = stream;
   } else if (els.callRemoteAudio.srcObject !== stream) {
     els.callRemoteAudio.srcObject = stream;
-    els.callRemoteAudio.play().catch(() => {});
   }
   applySpeaker();
+  resumeCallMedia();
 }
 
 function createPeerConnection() {
@@ -1940,6 +1996,7 @@ function createPeerConnection() {
     if (pc.connectionState === 'connected') {
       stopRing();
       clearRingTimeout();
+      clearConnectTimeout();
       call.iceAttempts = 0;
       if (call.iceTimer) {
         clearTimeout(call.iceTimer);
@@ -2020,7 +2077,9 @@ function sendSignalBeacon(target, type) {
 
 function cleanupCall(current) {
   if (!current) return;
+  mediaBlocked = false;
   clearRingTimeout(current);
+  clearConnectTimeout(current);
   if (current.iceTimer) clearTimeout(current.iceTimer);
   current.ringTimeout = null;
   current.iceTimer = null;
@@ -2042,6 +2101,7 @@ function endCall(message, signalType) {
   stopRing();
   stopCallTimer();
   if (signalType) sendSignalBeacon(current, signalType);
+  earlyIce.delete(`${current.peerId}:${current.callId}`);
   call = null;
   cleanupCall(current);
   renderCallUi();
@@ -2083,6 +2143,7 @@ async function startCall(withVideo) {
     videoSender: null,
     screenStream: null,
     ringTimeout: null,
+    connectTimeout: null,
     iceTimer: null,
     iceAttempts: 0,
   };
@@ -2159,7 +2220,7 @@ async function acceptCall() {
 
     call.offer = null;
     call.state = 'active';
-    startCallTimer();
+    armConnectTimeout();
     renderCallUi();
   } catch (error) {
     const denied = error && (error.name === 'NotAllowedError' || error.name === 'SecurityError');
@@ -2254,6 +2315,7 @@ async function handleSignal(signal) {
       sendSignalBeacon({ peerId: signal.fromId, callId: signal.callId }, 'decline');
       return;
     }
+    const iceKey = `${signal.fromId}:${signal.callId}`;
     call = {
       callId: signal.callId,
       peerId: signal.fromId,
@@ -2262,7 +2324,7 @@ async function handleSignal(signal) {
       state: 'incoming',
       withVideo: Boolean(signal.data && /m=video/.test(signal.data.sdp || '')),
       muted: false,
-      pendingIce: [],
+      pendingIce: earlyIce.get(iceKey) || [],
       offer: signal.data,
       startedAt: 0,
       pc: null,
@@ -2271,12 +2333,23 @@ async function handleSignal(signal) {
       videoSender: null,
       screenStream: null,
       ringTimeout: null,
+      connectTimeout: null,
       iceTimer: null,
       iceAttempts: 0,
     };
+    earlyIce.delete(iceKey);
     renderCallUi();
     startRing();
     armRingTimeout();
+    return;
+  }
+
+  if (signal.type === 'ice' && signal.data && (!call || call.callId !== signal.callId)) {
+    const key = `${signal.fromId}:${signal.callId}`;
+    const queued = earlyIce.get(key) || [];
+    queued.push(signal.data);
+    if (queued.length > 64) queued.shift();
+    earlyIce.set(key, queued);
     return;
   }
 
@@ -2289,7 +2362,7 @@ async function handleSignal(signal) {
       await call.pc.setRemoteDescription(signal.data);
       await flushPendingIce();
       call.state = 'active';
-      startCallTimer();
+      armConnectTimeout();
       renderCallUi();
     } catch (error) {
       endCall(`Call failed: ${error.message}`, 'hangup');
@@ -2352,6 +2425,7 @@ function connect() {
       if (data.config.maxFullName) MAX_FULL_NAME = data.config.maxFullName;
       if (data.config.maxGroupName) MAX_GROUP_NAME = data.config.maxGroupName;
       if (data.config.maxText) MAX_TEXT = data.config.maxText;
+      configureRtc(data.config);
     }
     users = data.users || [];
     callLog = data.calls || [];
@@ -3076,27 +3150,6 @@ function toggleChatMenu() {
   }
 }
 
-function exportConversation(format) {
-  const conversation = activeConversation();
-  if (!conversation) {
-    toast('Open a conversation first', 'error');
-    return;
-  }
-  closeChatMenu();
-  const params = new URLSearchParams({
-    id: me.id,
-    channel: conversation.id,
-    format,
-  });
-  const link = document.createElement('a');
-  link.href = `/api/export?${params}`;
-  link.download = '';
-  document.body.append(link);
-  link.click();
-  link.remove();
-  toast(`Exporting ${conversation.name} as ${format.toUpperCase()}`);
-}
-
 function openGlobalSearch() {
   closeChatMenu();
   els.globalSearchInput.value = '';
@@ -3701,6 +3754,7 @@ els.callAccept.addEventListener('click', acceptCall);
 els.callDecline.addEventListener('click', () => endCall('Call declined', 'decline'));
 els.callHangup.addEventListener('click', () => endCall('Call ended', 'hangup'));
 els.callMute.addEventListener('click', toggleMute);
+els.callOverlay.addEventListener('click', () => resumeCallMedia());
 
 window.addEventListener('pagehide', () => {
   if (call) sendSignalBeacon(call, 'hangup');
@@ -3731,15 +3785,8 @@ els.chatMenu.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleChatMenu();
 });
-els.menuSearch.addEventListener('click', openGlobalSearch);
-els.menuPins.addEventListener('click', () => {
-  closeChatMenu();
-  openPins();
-});
 els.menuMembers.addEventListener('click', showMembersPanel);
-els.menuLeaveGroup.addEventListener('click', leaveGroup);
-els.menuExportHtml.addEventListener('click', () => exportConversation('html'));
-els.menuExportJson.addEventListener('click', () => exportConversation('json'));
+els.leaveChat.addEventListener('click', leaveGroup);
 els.menuCalls.addEventListener('click', openCallHistory);
 els.menuDevices.addEventListener('click', openDevices);
 
