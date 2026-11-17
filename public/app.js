@@ -4,6 +4,7 @@ const FULL_NAME_KEY = 'lanchat.fullName';
 const CHANNEL_KEY = 'lanchat.channel';
 const SEEN_KEY = 'lanchat.seen';
 const THEME_KEY = 'lanchat.theme';
+const COLORS_KEY = 'lanchat.colors';
 const SOUND_KEY = 'lanchat.sound';
 const NOTIFY_KEY = 'lanchat.notify';
 const DRAFT_KEY = 'lanchat.drafts';
@@ -43,6 +44,7 @@ const ICONS = {
   delete: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/></svg>',
   download: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M7 10l5 5 5-5M5 19h14"/></svg>',
   pin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 4 6 6M14 3l7 7-4 1-2 5-2 2-7-7 2-2 5-2 1-4Z"/><path d="m10 14-6 6"/></svg>',
+  unsent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13"/><path d="m10 11 4 4M14 11l-4 4"/></svg>',
   close: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
 };
 
@@ -76,6 +78,7 @@ const els = {
   toggleSearch: document.getElementById('toggle-search'),
   toggleSound: document.getElementById('toggle-sound'),
   toggleNotify: document.getElementById('toggle-notify'),
+  themeColors: document.getElementById('theme-colors'),
   newGroup: document.getElementById('new-group'),
   newRoom: document.getElementById('new-room'),
   groupDialog: document.getElementById('group-dialog'),
@@ -99,6 +102,8 @@ const els = {
   chatMenuPanel: document.getElementById('chat-menu-panel'),
   menuSearch: document.getElementById('menu-search'),
   menuPins: document.getElementById('menu-pins'),
+  menuMembers: document.getElementById('menu-members'),
+  menuLeaveGroup: document.getElementById('menu-leave-group'),
   menuExportHtml: document.getElementById('menu-export-html'),
   menuExportJson: document.getElementById('menu-export-json'),
   menuCalls: document.getElementById('menu-calls'),
@@ -117,6 +122,18 @@ const els = {
   speakerSelect: document.getElementById('speaker-select'),
   deviceNote: document.getElementById('device-note'),
   devicesClose: document.getElementById('devices-close'),
+  colorsDialog: document.getElementById('colors-dialog'),
+  colorBg: document.getElementById('color-bg'),
+  colorSurface: document.getElementById('color-surface'),
+  colorText: document.getElementById('color-text'),
+  colorAccent: document.getElementById('color-accent'),
+  colorAccent2: document.getElementById('color-accent2'),
+  colorMine: document.getElementById('color-mine'),
+  colorBubble: document.getElementById('color-bubble'),
+  colorPresets: document.getElementById('color-presets'),
+  colorsReset: document.getElementById('colors-reset'),
+  colorsClose: document.getElementById('colors-close'),
+  membersTitle: document.getElementById('members-title'),
   mentionMenu: document.getElementById('mention-menu'),
   uploadPanel: document.getElementById('upload-panel'),
   liveRegion: document.getElementById('live-region'),
@@ -177,6 +194,44 @@ function loadDrafts() {
     return {};
   }
 }
+
+const COLOR_FIELDS = ['bg', 'surface', 'text', 'accent', 'accent2', 'mine', 'bubble'];
+const COLOR_DEFAULTS = {
+  dark: {
+    bg: '#080a10',
+    surface: '#141926',
+    text: '#eef1f9',
+    accent: '#7b9bff',
+    accent2: '#a45cff',
+    mine: '#5a78f2',
+    bubble: '#232a3d',
+  },
+  light: {
+    bg: '#eef1f8',
+    surface: '#ffffff',
+    text: '#101728',
+    accent: '#4f6ef7',
+    accent2: '#8b5cf6',
+    mine: '#5a78f2',
+    bubble: '#ffffff',
+  },
+};
+
+function loadColors() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(COLORS_KEY) || 'null');
+    if (!stored || typeof stored !== 'object') return {};
+    const colors = {};
+    for (const field of COLOR_FIELDS) {
+      if (/^#[0-9a-f]{6}$/i.test(stored[field])) colors[field] = stored[field];
+    }
+    return colors;
+  } catch {
+    return {};
+  }
+}
+
+let customColors = loadColors();
 
 const me = {
   id: getDeviceId(),
@@ -531,13 +586,16 @@ function updateHeader(conversation) {
     els.input.placeholder = 'Message the room…';
     updateCallButtons(null);
     updatePinCount();
+    els.menuMembers.hidden = true;
+    els.menuLeaveGroup.hidden = true;
     return;
   }
 
   updateCallButtons(conversation);
   els.roomTitle.textContent = conversation.name;
   els.roomIcon.className = `room-icon ${conversation.type}`;
-
+  els.menuMembers.hidden = conversation.type === 'dm';
+  els.menuLeaveGroup.hidden = conversation.type !== 'group';
   if (conversation.type === 'dm') {
     els.roomIcon.textContent = initials(conversation.name);
     els.roomIcon.style.background = avatarColor(conversation.name);
@@ -565,7 +623,11 @@ function updateHeader(conversation) {
 function messagePreview(message) {
   if (!message) return 'No messages yet';
   if (message.deleted) return `${message.name} unsent a message`;
-  if (message.kind === 'file') return `📎 ${message.file?.name || 'Attachment'}`;
+  if (message.kind === 'file') {
+    const name = message.file?.name || 'Attachment';
+    const caption = (message.text || '').trim();
+    return caption && caption !== name ? `📎 ${name} · ${caption}` : `📎 ${name}`;
+  }
   return message.text || '';
 }
 
@@ -613,7 +675,7 @@ function fileUrl(file, inline) {
   return `/api/files/${encodeURIComponent(file.id)}?id=${encodeURIComponent(me.id)}${inline ? '&inline=1' : ''}`;
 }
 
-function buildFileBubble(message) {
+function buildFileBubble(message, conversation) {
   const file = message.file;
   const wrap = make('div', 'file-msg');
   const isImage = typeof file.type === 'string' && file.type.startsWith('image/');
@@ -643,6 +705,12 @@ function buildFileBubble(message) {
 
   row.append(icon, meta, download);
   wrap.append(row);
+  const caption = (message.text || '').trim();
+  if (caption && caption !== file.name) {
+    const cap = make('div', 'file-caption-text');
+    cap.append(linkify(caption, conversation));
+    wrap.append(cap);
+  }
   return wrap;
 }
 
@@ -725,13 +793,6 @@ function buildMessageRow(message, conversation, previous) {
 
   const body = make('div', 'msg-body');
 
-  if (message.deleted) {
-    row.classList.add('is-unsent');
-    body.append(make('div', 'msg-unsent', `'${message.name}' unsent a message`));
-    row.append(body);
-    return row;
-  }
-
   if (!grouped) {
     const head = make('div', 'msg-head');
     let displayName = mine ? message.name + ' (you)' : message.name;
@@ -746,13 +807,28 @@ function buildMessageRow(message, conversation, previous) {
     body.append(head);
   }
 
+  if (message.deleted) {
+    row.classList.add('is-unsent');
+    const pad = make('div', 'msg-unsent');
+    const icon = make('span', 'msg-unsent-icon');
+    icon.innerHTML = ICONS.unsent;
+    pad.append(
+      icon,
+      make('span', 'msg-unsent-text', `${mine ? 'You' : message.name} unsent a message`),
+      make('span', 'msg-unsent-time', formatTime(message.time)),
+    );
+    body.append(pad);
+    row.append(body);
+    return row;
+  }
+
   if (message.pinnedAt) {
     body.append(make('div', 'pinned-label', 'Pinned message'));
   }
   if (message.replyTo) body.append(buildReplyQuote(message));
 
   if (message.kind === 'file' && message.file) {
-    body.append(buildFileBubble(message));
+    body.append(buildFileBubble(message, conversation));
   } else {
     const text = make('div', 'msg-text');
     text.append(linkify(message.text || '', conversation));
@@ -1082,13 +1158,39 @@ function renderChannels() {
   updateTitle();
 }
 
+function conversationMembers(conversation) {
+  if (conversation?.type === 'group') {
+    const members = (conversation.members || []).map((member) => {
+      const live = users.find((user) => user.id === member.id);
+      return {
+        id: member.id,
+        name: live?.name || member.name || 'Unknown device',
+        fullName: live?.fullName || '',
+        credentials: live?.credentials || '',
+        online: Boolean(live) || member.id === me.id,
+      };
+    });
+    if (!members.some((member) => member.id === me.id)) {
+      members.push({ id: me.id, name: me.name, fullName: me.fullName, credentials: '', online: true });
+    }
+    return members.sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  }
+
+  return users.map((user) => ({ ...user, online: true }));
+}
+
 function renderUsers() {
-  els.onlineCount.textContent = String(users.length);
+  const conversation = activeConversation();
+  const members = conversationMembers(conversation);
+  const isGroup = conversation?.type === 'group';
+  if (els.membersTitle) els.membersTitle.textContent = isGroup ? 'Members' : 'Online';
+  els.onlineCount.textContent = String(isGroup ? members.length : users.length);
   els.users.replaceChildren();
 
-  for (const user of users) {
+  for (const user of members) {
     const li = make('li');
     if (user.id === me.id) li.classList.add('is-me');
+    if (!user.online) li.classList.add('offline');
 
     const avatar = make('div', 'avatar', initials(user.name));
     avatar.style.background = avatarColor(user.name);
@@ -1097,15 +1199,16 @@ function renderUsers() {
     info.append(make('span', 'user-name', user.name));
     const metaText = formatProfile(user);
     if (metaText) info.append(make('span', 'user-meta', metaText));
+    if (!user.online) info.append(make('span', 'user-meta', 'Offline'));
 
     const dot = make('span', 'presence-dot');
-    dot.title = 'Online';
+    dot.title = user.online ? 'Online' : 'Offline';
 
     li.append(avatar, info, dot);
 
     if (user.id === me.id) {
       li.append(make('span', 'you', 'you'));
-    } else {
+    } else if (user.online) {
       li.classList.add('clickable');
       li.title = `Send ${user.name} a private message`;
       li.addEventListener('click', () => openDm(user));
@@ -1114,7 +1217,6 @@ function renderUsers() {
     els.users.append(li);
   }
 
-  const conversation = activeConversation();
   if (conversation) updateHeader(conversation);
 }
 
@@ -1133,6 +1235,7 @@ function setActive(id) {
   closeSearch();
   renderChannels();
   updateHeader(conversation);
+  renderUsers();
   renderMessages({ scroll: true });
   els.app.classList.remove('sidebar-open', 'members-open');
   els.input.focus();
@@ -1638,6 +1741,7 @@ function applyConversations(incoming) {
 
   renderChannels();
   updateHeader(activeConversation());
+  renderUsers();
   renderMessages({ scroll: false });
 }
 
@@ -2286,6 +2390,19 @@ function connect() {
     }
   });
 
+  source.addEventListener('group-members', (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      const conversation = getConversation(data.channel);
+      if (!conversation) return;
+      conversation.members = data.members || [];
+      renderUsers();
+      if (conversation.id === activeId) updateHeader(conversation);
+    } catch {
+      // Ignore malformed payloads.
+    }
+  });
+
   source.addEventListener('typing', (event) => {
     try {
       const data = JSON.parse(event.data);
@@ -2411,9 +2528,16 @@ function mentionsInText(text, conversation) {
 
 async function sendMessage() {
   if (uploadInProgress) return;
-  const text = els.input.value.trim();
   const conversation = activeConversation();
-  if (!text || !conversation) return;
+  if (!conversation) return;
+  const text = els.input.value.trim();
+  const pendingFiles = uploads.filter((item) => item.status === 'pending' && item.channel === conversation.id);
+
+  if (!editingId && pendingFiles.length > 0) {
+    await sendFilesWithMessage(conversation, pendingFiles, text);
+    return;
+  }
+  if (!text) return;
 
   els.send.disabled = true;
   els.input.value = '';
@@ -2472,6 +2596,41 @@ async function sendMessage() {
     toast(error.message, 'error');
   } finally {
     els.send.disabled = false;
+    if (activeId === targetId) els.input.focus();
+  }
+}
+
+async function sendFilesWithMessage(conversation, items, text) {
+  const targetId = conversation.id;
+  const pendingReply = replyTo;
+  els.send.disabled = true;
+  els.input.value = '';
+  autoResize();
+  stopTyping();
+  closeMentionMenu();
+
+  let firstFailed = false;
+  let captionPending = text;
+  try {
+    for (const item of items) {
+      if (item.status !== 'pending') continue;
+      const sent = await sendPendingItem(item, { caption: captionPending });
+      if (!sent && captionPending === text) firstFailed = true;
+      captionPending = '';
+    }
+    delete drafts[conversation.id];
+    saveDrafts();
+    renderChannels();
+    if (activeId === targetId && pendingReply && replyTo?.id === pendingReply.id) {
+      replyTo = null;
+      updateComposerBanner();
+    }
+  } finally {
+    els.send.disabled = false;
+    if (firstFailed && activeId === targetId && text && !els.input.value) {
+      els.input.value = text;
+      autoResize();
+    }
     if (activeId === targetId) els.input.focus();
   }
 }
@@ -2583,7 +2742,7 @@ function cancelUpload(item) {
   setTimeout(() => removeUpload(item), 1200);
 }
 
-function uploadFile(item, conversation, pendingReply) {
+function uploadFile(item, conversation, pendingReply, caption) {
   return new Promise((resolve, reject) => {
     const file = item.file;
     const params = new URLSearchParams({
@@ -2594,6 +2753,7 @@ function uploadFile(item, conversation, pendingReply) {
       type: file.type || 'application/octet-stream',
     });
     if (pendingReply?.id) params.set('reply', pendingReply.id);
+    if (caption) params.set('caption', caption);
 
     const xhr = new XMLHttpRequest();
     item.xhr = xhr;
@@ -2639,16 +2799,30 @@ function restoreConnectionStatus() {
   }, 2500);
 }
 
-async function sendPendingItem(item) {
-  if (!item || (item.status !== 'pending' && item.status !== 'failed')) return;
+async function sendPendingItem(item, options = {}) {
+  if (!item || (item.status !== 'pending' && item.status !== 'failed')) return false;
   if (uploadInProgress) {
     toast('Please wait for the current transfer to finish.', 'error');
-    return;
+    return false;
   }
   const conversation = getConversation(item.channel) || activeConversation();
   if (!conversation) {
     toast('Open a conversation to send this file.', 'error');
-    return;
+    return false;
+  }
+
+  const composerText = options.caption === undefined && item.channel === activeId ? els.input.value.trim() : '';
+  let caption;
+  if (options.caption !== undefined) caption = options.caption;
+  else if (composerText) caption = composerText;
+  else caption = item.caption || '';
+  if (caption) item.caption = caption;
+  if (composerText) {
+    els.input.value = '';
+    autoResize();
+    delete drafts[item.channel];
+    saveDrafts();
+    renderChannels();
   }
 
   item.cancelled = false;
@@ -2660,7 +2834,7 @@ async function sendPendingItem(item) {
   els.attach.disabled = true;
   stopTyping();
   try {
-    await uploadFile(item, conversation, item.reply);
+    await uploadFile(item, conversation, item.reply, caption);
     item.status = 'done';
     item.percent = 100;
     renderUploads();
@@ -2669,6 +2843,7 @@ async function sendPendingItem(item) {
       replyTo = null;
       updateComposerBanner();
     }
+    return true;
   } catch (error) {
     if (error.cancelled || item.cancelled) {
       removeUpload(item);
@@ -2677,6 +2852,12 @@ async function sendPendingItem(item) {
       renderUploads();
       toast('Upload failed: ' + error.message, 'error');
     }
+    if (composerText && activeId === item.channel && !els.input.value) {
+      els.input.value = composerText;
+      autoResize();
+      saveDraft(item.channel);
+    }
+    return false;
   } finally {
     uploadInProgress = false;
     els.attach.disabled = false;
@@ -2713,7 +2894,7 @@ function sendFiles(fileList) {
   uploads.push(...items);
   renderUploads();
   els.uploadPanel.scrollIntoView({ block: 'nearest' });
-  toast(items.length === 1 ? 'Review the file, then send or delete it.' : 'Review the files, then send or delete them.');
+  toast(items.length === 1 ? 'File attached — add a message if you like, then press Send.' : 'Files attached — add a message if you like, then press Send.');
 }
 
 /* ---------- Group dialog ---------- */
@@ -2795,6 +2976,43 @@ async function createGroup(event) {
 }
 
 /* ---------- Public rooms ---------- */
+
+function showMembersPanel() {
+  closeChatMenu();
+  renderUsers();
+  if (window.matchMedia('(max-width: 820px)').matches) {
+    els.app.classList.remove('sidebar-open');
+    els.app.classList.add('members-open');
+  } else {
+    els.app.classList.remove('members-collapsed');
+  }
+}
+
+async function leaveGroup() {
+  const conversation = activeConversation();
+  if (!conversation || conversation.type !== 'group') return;
+  if (!window.confirm(`Leave "${conversation.name}"? You will stop receiving its messages.`)) return;
+  closeChatMenu();
+
+  try {
+    await postJson('/api/groups/leave', { id: me.id, channel: conversation.id });
+    conversations = conversations.filter((entry) => entry.id !== conversation.id);
+    if (activeId === conversation.id) {
+      const next = getConversation('general') || sortedConversations()[0];
+      activeId = next ? next.id : 'general';
+      localStorage.setItem(CHANNEL_KEY, activeId);
+      loadDraft(activeId);
+    }
+    renderChannels();
+    updateHeader(activeConversation());
+    renderUsers();
+    renderMessages({ scroll: false });
+    els.app.classList.remove('sidebar-open', 'members-open');
+    toast(`You left ${conversation.name}`);
+  } catch (error) {
+    toast(`Could not leave group: ${error.message}`, 'error');
+  }
+}
 
 function openRoomDialog() {
   els.roomName.value = '';
@@ -3055,13 +3273,154 @@ function closeSearch() {
   renderMessages({ scroll: false });
 }
 
+function hexToRgb(hex) {
+  const value = Number.parseInt(String(hex).replace('#', ''), 16);
+  return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+function rgbToHex(red, green, blue) {
+  return `#${[red, green, blue]
+    .map((channel) => Math.max(0, Math.min(255, Math.round(channel))).toString(16).padStart(2, '0'))
+    .join('')}`;
+}
+
+function hexToRgba(hex, alpha) {
+  const [red, green, blue] = hexToRgb(hex);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+function shadeHex(hex, amount) {
+  const [red, green, blue] = hexToRgb(hex);
+  return rgbToHex(red + 255 * amount, green + 255 * amount, blue + 255 * amount);
+}
+
+function colorPalette() {
+  const base = COLOR_DEFAULTS[settings.theme === 'light' ? 'light' : 'dark'];
+  return { ...base, ...customColors };
+}
+
+function applyCustomColors() {
+  const root = document.documentElement;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  const variables = [
+    '--bg', '--bg-2', '--panel', '--panel-solid', '--panel-2', '--panel-3',
+    '--bubble', '--bubble-mine', '--text', '--accent', '--accent-2',
+    '--accent-soft', '--gradient',
+  ];
+
+  if (Object.keys(customColors).length === 0) {
+    for (const name of variables) root.style.removeProperty(name);
+    els.themeColors?.classList.remove('active');
+    if (meta) meta.setAttribute('content', settings.theme === 'light' ? '#f4f6fb' : '#0a0c12');
+    return;
+  }
+
+  const palette = colorPalette();
+  root.style.setProperty('--bg', palette.bg);
+  root.style.setProperty('--bg-2', palette.bg);
+  root.style.setProperty('--panel', hexToRgba(palette.surface, 0.82));
+  root.style.setProperty('--panel-solid', palette.surface);
+  root.style.setProperty('--panel-2', palette.surface);
+  root.style.setProperty('--panel-3', shadeHex(palette.surface, settings.theme === 'light' ? -0.04 : 0.07));
+  root.style.setProperty('--bubble', palette.bubble);
+  root.style.setProperty('--bubble-mine', `linear-gradient(135deg, ${palette.mine} 0%, ${shadeHex(palette.mine, 0.1)} 100%)`);
+  root.style.setProperty('--text', palette.text);
+  root.style.setProperty('--accent', palette.accent);
+  root.style.setProperty('--accent-2', palette.accent2);
+  root.style.setProperty('--accent-soft', hexToRgba(palette.accent, 0.14));
+  root.style.setProperty('--gradient', `linear-gradient(135deg, ${palette.accent} 0%, ${palette.accent2} 100%)`);
+  if (meta) meta.setAttribute('content', palette.bg);
+  els.themeColors?.classList.add('active');
+}
+
+function saveColors() {
+  try {
+    if (Object.keys(customColors).length === 0) localStorage.removeItem(COLORS_KEY);
+    else localStorage.setItem(COLORS_KEY, JSON.stringify(customColors));
+  } catch {
+    // Storage may be full or unavailable.
+  }
+}
+
+function colorInputMap() {
+  return {
+    bg: els.colorBg,
+    surface: els.colorSurface,
+    text: els.colorText,
+    accent: els.colorAccent,
+    accent2: els.colorAccent2,
+    mine: els.colorMine,
+    bubble: els.colorBubble,
+  };
+}
+
+function syncColorInputs() {
+  const palette = colorPalette();
+  for (const [field, input] of Object.entries(colorInputMap())) {
+    if (input) input.value = palette[field];
+  }
+}
+
+const COLOR_PRESETS = [
+  { name: 'Midnight', colors: COLOR_DEFAULTS.dark },
+  { name: 'Daylight', colors: COLOR_DEFAULTS.light },
+  { name: 'Ocean', colors: { bg: '#061826', surface: '#0c2a42', text: '#e7f6ff', accent: '#38bdf8', accent2: '#22d3ee', mine: '#0ea5e9', bubble: '#123c5a' } },
+  { name: 'Sunset', colors: { bg: '#1b0c12', surface: '#2a141c', text: '#fff1f4', accent: '#fb7185', accent2: '#f59e0b', mine: '#f43f5e', bubble: '#3a1d28' } },
+  { name: 'Forest', colors: { bg: '#07130d', surface: '#0f2418', text: '#eafff3', accent: '#34d399', accent2: '#a3e635', mine: '#10b981', bubble: '#173a28' } },
+  { name: 'Rose', colors: { bg: '#fdf2f8', surface: '#ffffff', text: '#3b0a2a', accent: '#db2777', accent2: '#9333ea', mine: '#ec4899', bubble: '#ffffff' } },
+];
+
+function renderColorPresets() {
+  if (!els.colorPresets) return;
+  els.colorPresets.replaceChildren();
+  for (const preset of COLOR_PRESETS) {
+    const button = make('button', 'color-preset');
+    button.type = 'button';
+    const swatch = make('span', 'color-preset-swatch');
+    swatch.style.background = `linear-gradient(135deg, ${preset.colors.accent}, ${preset.colors.accent2})`;
+    button.append(swatch, make('span', null, preset.name));
+    button.addEventListener('click', () => {
+      customColors = { ...preset.colors };
+      saveColors();
+      syncColorInputs();
+      applyCustomColors();
+    });
+    els.colorPresets.append(button);
+  }
+}
+
+function openColors() {
+  syncColorInputs();
+  renderColorPresets();
+  openDialog(els.colorsDialog, els.colorBg);
+}
+
+function applyColorInputs() {
+  customColors = {};
+  for (const [field, input] of Object.entries(colorInputMap())) {
+    if (input && /^#[0-9a-f]{6}$/i.test(input.value)) customColors[field] = input.value;
+  }
+  saveColors();
+  applyCustomColors();
+}
+
+function resetColors() {
+  customColors = {};
+  saveColors();
+  syncColorInputs();
+  applyCustomColors();
+  toast('Theme colors reset');
+}
+
 function applyTheme(theme) {
   settings.theme = theme === 'light' ? 'light' : 'dark';
   document.documentElement.dataset.theme = settings.theme;
   localStorage.setItem(THEME_KEY, settings.theme);
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', settings.theme === 'light' ? '#f4f6fb' : '#0a0c12');
+  applyCustomColors();
 }
+
 
 function syncSettingButtons() {
   els.toggleSound.classList.toggle('active', settings.sound);
@@ -3257,6 +3616,17 @@ els.searchClose.addEventListener('click', closeSearch);
 
 els.toggleTheme.addEventListener('click', () => {
   applyTheme(settings.theme === 'light' ? 'dark' : 'light');
+  syncColorInputs();
+});
+
+els.themeColors.addEventListener('click', openColors);
+for (const input of Object.values(colorInputMap())) {
+  if (input) input.addEventListener('input', applyColorInputs);
+}
+els.colorsReset.addEventListener('click', resetColors);
+els.colorsClose.addEventListener('click', () => closeDialog(els.colorsDialog));
+els.colorsDialog.addEventListener('click', (event) => {
+  if (event.target === els.colorsDialog) closeDialog(els.colorsDialog);
 });
 
 els.toggleSound.addEventListener('click', () => {
@@ -3366,6 +3736,8 @@ els.menuPins.addEventListener('click', () => {
   closeChatMenu();
   openPins();
 });
+els.menuMembers.addEventListener('click', showMembersPanel);
+els.menuLeaveGroup.addEventListener('click', leaveGroup);
 els.menuExportHtml.addEventListener('click', () => exportConversation('html'));
 els.menuExportJson.addEventListener('click', () => exportConversation('json'));
 els.menuCalls.addEventListener('click', openCallHistory);
@@ -3445,6 +3817,7 @@ document.addEventListener('keydown', (event) => {
       else if (dialog === els.searchDialog) closeDialog(els.searchDialog);
       else if (dialog === els.callsDialog) closeDialog(els.callsDialog);
       else if (dialog === els.devicesDialog) closeDialog(els.devicesDialog);
+      else if (dialog === els.colorsDialog) closeDialog(els.colorsDialog);
       else closeDialog(dialog);
       return;
     }

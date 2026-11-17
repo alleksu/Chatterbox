@@ -482,6 +482,7 @@ async function handleFileUpload(req, res) {
   const senderName = cleanText(url.searchParams.get('name'), MAX_NAME) || 'Anonymous';
   const filename = cleanFilename(url.searchParams.get('filename'));
   const type = cleanText(url.searchParams.get('type'), 120) || 'application/octet-stream';
+  const caption = cleanText(url.searchParams.get('caption'), MAX_TEXT);
   const info = parseChannel(url.searchParams.get('channel'));
 
   if (!userId) return send(res, 400, { error: 'Missing sender id' });
@@ -519,7 +520,7 @@ async function handleFileUpload(req, res) {
     id: messageId(),
     userId,
     name: senderName,
-    text: filename,
+    text: caption || filename,
     time: Date.now(),
     channel,
     kind: 'file',
@@ -844,6 +845,39 @@ async function handleCreateGroup(req, res) {
 
   refreshConversationsFor(members);
   send(res, 200, { ok: true, group: { id: group.id, name: group.name, channel: `group:${group.id}` } });
+}
+
+async function handleLeaveGroup(req, res) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+
+  const userId = cleanText(body.id, 64);
+  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+
+  const info = parseChannel(body.channel);
+  const group = info?.type === 'group'
+    ? info.group
+    : groups.get(cleanText(body.groupId, 64));
+  if (!group) return send(res, 404, { error: 'Group not found' });
+  if (!group.members.has(userId)) return send(res, 403, { error: 'You are not in this group' });
+
+  group.members.delete(userId);
+  const remaining = [...group.members];
+
+  if (remaining.length === 0) {
+    for (const message of groupHistory.get(group.id) || []) {
+      if (message.kind === 'file' && message.file?.id) deleteFileRecord(message.file.id);
+    }
+    groupHistory.delete(group.id);
+    groups.delete(group.id);
+  }
+
+  send(res, 200, { ok: true });
+  refreshConversationsFor([userId, ...remaining]);
+  deliverToChannel({ type: 'group', id: `group:${group.id}`, group }, 'group-members', {
+    channel: `group:${group.id}`,
+    members: remaining.map((id) => ({ id, name: userName(id) })),
+  });
 }
 
 async function handleCreateRoom(req, res) {
@@ -1260,6 +1294,7 @@ function requestHandler(req, res) {
   if (req.method === 'POST' && pathname === '/api/messages/delete') return handleDelete(req, res);
   if (req.method === 'POST' && pathname === '/api/messages/pin') return handlePin(req, res);
   if (req.method === 'POST' && pathname === '/api/groups') return handleCreateGroup(req, res);
+  if (req.method === 'POST' && pathname === '/api/groups/leave') return handleLeaveGroup(req, res);
   if (req.method === 'POST' && pathname === '/api/rooms') return handleCreateRoom(req, res);
   if (req.method === 'POST' && pathname === '/api/signal') return handleSignal(req, res);
   if (req.method === 'POST' && pathname === '/api/files') return handleFileUpload(req, res);

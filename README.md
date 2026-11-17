@@ -41,25 +41,26 @@ HTTPS=1 TLS_CERT=C:\certs\cert.pem TLS_KEY=C:\certs\key.pem node server.js
 - **General room** - the public channel every connected device shares.
 - **Public rooms** - create additional named rooms from the Rooms section. Everyone on the server can see and join them.
 - **Private messages** - click a name under **Online** to open a one-to-one conversation.
-- **Groups** - create a named group and choose its members. Group messages only reach members.
+- **Groups** - create a named group and choose its members. Group messages only reach members. View the member list and leave a group from the chat menu.
+- **Chat members** - the side panel shows the full member list in groups and everyone online in public rooms.
 - **Mentions** - type `@` to pick an online user. Mentioned messages are highlighted for the recipient, with a notification and a louder alert sound.
 - **Pinned messages** - pin or unpin any message in a room, group, or DM. The pin button in the header shows the current count and opens the list.
 - **Search all chats** - search messages across public rooms, your groups, and your DMs from the chat menu. Ctrl/Cmd+F still filters the current conversation.
 - **Export** - download the current conversation as HTML or JSON from the chat menu.
 - **Drafts** - unsent text is saved per conversation in local storage and shown in the sidebar.
-- **Files & images** - use the paperclip, paste, or drag files onto the composer. Uploads show progress and can be cancelled. Images get an inline preview.
+- **Files & images** - use the paperclip, paste, or drag files onto the composer. Attach a file and type a message to send both together in one action. Uploads show progress and can be cancelled. Images get an inline preview.
 - **Audio & video calls** - open a private message and use the header buttons. Calls are peer-to-peer WebRTC and stay on the LAN.
 - **Call extras** - screen sharing during video calls, microphone/camera/speaker selection, ring timeout, ICE restart, and a per-device call history.
 - **Replies** - quote a message so the thread stays readable.
 - **Reactions** - tap the smiley on any message to react. Reactions are live for everyone in the conversation.
-- **Edit & delete** - edit or delete your own messages; attachments can be deleted too.
+- **Edit & delete** - edit or delete your own messages; attachments can be deleted too. Unsent messages leave a visible placeholder in the conversation.
 - **Read receipts** - see when the other side has read your message (single/double check).
 - **Typing indicators** - scoped to the conversation you are typing in.
 - **Unread badges** - per-conversation counts, plus a count in the browser tab title.
 - **Mobile gestures** - tap a message to reveal actions, swipe right to reply, and use the slide-over sidebar.
 - **Accessibility** - keyboard message navigation, focus trapping in dialogs, live-region announcements, and reduced-motion support.
 - **PWA** - install Chatterbox from the browser on a secure origin. Notifications open the exact conversation and message.
-- **Sounds, desktop alerts, light/dark themes** - all remembered on the device.
+- **Sounds, desktop alerts, light/dark themes** - all remembered on the device. Pick from presets or build a custom color palette with the **Colors** button.
 
 Set a different port with `PORT=4000 npm start`. Files are capped at 100 MB by default; change that with `MAX_FILE_MB=250 npm start`.
 
@@ -79,7 +80,7 @@ To package as a native app, wrap `public/` with Capacitor/Cordova, point it at y
 - `public/` - the dependency-free UI, service worker, manifest, and icons.
 - Messages are posted to `POST /api/messages` with a channel (`general`, `dm:<a>:<b>`, `group:<id>`, or `room:<id>`).
 - Conversations and actions:
-  - `POST /api/groups`, `POST /api/rooms`
+  - `POST /api/groups`, `POST /api/groups/leave`, `POST /api/rooms`
   - `POST /api/messages/edit`, `POST /api/messages/delete`, `POST /api/messages/pin`
   - `POST /api/reactions`, `POST /api/read-receipt`, `POST /api/typing`
 - Discovery and history:
