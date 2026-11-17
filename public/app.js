@@ -4021,11 +4021,11 @@ async function restoreLogin() {
     const data = await authClient.session();
     if (data.user) setAuthenticated(data);
     else {
-      showAuth(lastAccountId ? 'login' : 'register');
-      setStatus('Create an account or log in', '');
+      showAuth('login');
+      setStatus('Log in or create an account', '');
     }
   } catch (error) {
-    showAuth(lastAccountId ? 'login' : 'register');
+    showAuth('login');
     els.authError.textContent = error.message;
     els.authError.hidden = false;
     setStatus('Cannot connect', 'offline');

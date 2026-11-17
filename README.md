@@ -18,7 +18,7 @@ The server binds to `0.0.0.0` and prints the addresses to open. When `certs/cert
   On the LAN:       https://192.168.1.23:3000
 ```
 
-Open `http://localhost:3000` to create an account with Name, Username and Password. New visitors see **Create your Chatterbox account** first; existing users can select **Already registered? Log in**. For another device on the LAN, **start in HTTPS mode** (`npm run cert` then `npm run start:https`) before registering or logging in. Use **Invite** in the sidebar to copy the address and share it.
+Open `http://localhost:3000` to log in with your Username and Password. New visitors see **Log in to Chatterbox** first and can select **No account? Create one** to register with Name, Username and Password. For another device on the LAN, **start in HTTPS mode** (`npm run cert` then `npm run start:https`) before registering or logging in. Use **Invite** in the sidebar to copy the address and share it.
 
 ## HTTPS for phone calls
 
