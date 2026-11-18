@@ -1,4 +1,5 @@
 import { createAuthClient } from './auth-client.js';
+import { GroupCallMedia } from './group-call-media.js';
 
 const authClient = createAuthClient();
 const ID_KEY = 'lanchat.id';
@@ -152,6 +153,12 @@ const els = {
   callAudioBtn: document.getElementById('call-audio'),
   callVideoBtn: document.getElementById('call-video'),
   callOverlay: document.getElementById('call-overlay'),
+  groupCallGrid: document.getElementById('group-call-grid'),
+  groupCallBanner: document.getElementById('group-call-banner'),
+  groupCallSummary: document.getElementById('group-call-summary'),
+  groupCallJoin: document.getElementById('group-call-join'),
+  callCamera: document.getElementById('call-camera'),
+  callMinimize: document.getElementById('call-minimize'),
   callRemoteVideo: document.getElementById('call-remote-video'),
   callRemoteAudio: document.getElementById('call-remote-audio'),
   callLocalVideo: document.getElementById('call-local-video'),
@@ -1823,6 +1830,9 @@ const RING_TIMEOUT = 35_000;
 const CONNECT_TIMEOUT = 15_000;
 
 let call = null;
+let connectionId = null;
+const dismissedGroupCalls = new Set();
+const groupTiles = new Map();
 let callTimerId = null;
 let ringInterval = null;
 let ringCtx = null;
@@ -1905,7 +1915,204 @@ function activePeerConversation() {
 }
 
 function updateCallButtons(conversation) {
-  els.callButtons.hidden = !conversation || conversation.type !== 'dm';
+  els.callButtons.hidden = !conversation || !['dm', 'group'].includes(conversation.type);
+  const group = conversation?.type === 'group';
+  const ongoing = group && conversation.call;
+  for (const [button, video] of [[els.callAudioBtn, false], [els.callVideoBtn, true]]) {
+    const label = ongoing ? 'Join group call' : `Start ${group ? 'group ' : ''}${video ? 'video' : 'voice'} call`;
+    button.title = label;
+    button.setAttribute('aria-label', label);
+  }
+  els.groupCallBanner.hidden = !ongoing;
+  if (ongoing) {
+    els.groupCallSummary.textContent = `${ongoing.withVideo ? 'Group video' : 'Group voice'} call · ${ongoing.participants.length}/${ongoing.maxParticipants} people`;
+    const joinedHere = call?.kind === 'group' && call.callId === ongoing.callId && call.joined;
+    const joinedElsewhere = !joinedHere && ongoing.participants.some((p) => p.id === me.id);
+    els.groupCallJoin.textContent = joinedHere ? 'Return to call' : joinedElsewhere ? 'Joined on another device' : 'Join call';
+    els.groupCallJoin.disabled = joinedElsewhere;
+  }
+}
+
+function groupCallRequest(action, current, extra = {}) {
+  return apiJson(`/api/group-calls/${action}`, {
+    method: 'POST', signal: AbortSignal.timeout(10000),
+    headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+    body: JSON.stringify({ channel: current.channel, callId: current.callId, connectionId, ...extra }),
+  });
+}
+
+function renderGroupTiles(current) {
+  const ids = new Set(current.participants.map((p) => p.id));
+  for (const [id, tile] of groupTiles) if (!ids.has(id)) {
+    tile.media.srcObject = null;
+    tile.root.remove();
+    groupTiles.delete(id);
+  }
+  for (const participant of current.participants) {
+    const local = participant.id === me.id;
+    let tile = groupTiles.get(participant.id);
+    if (!tile) {
+      const root = make('div', 'group-call-tile');
+      const media = document.createElement(current.withVideo ? 'video' : 'audio');
+      media.autoplay = true;
+      media.playsInline = true;
+      media.muted = local;
+      const avatar = make('div', 'avatar group-call-avatar', initials(participant.name));
+      avatar.style.background = avatarColor(participant.name);
+      const caption = make('div', 'group-call-caption');
+      const name = make('strong', null, local ? `${participant.name} (you)` : participant.name);
+      const status = make('span');
+      caption.append(name, status);
+      root.append(media, avatar, caption);
+      els.groupCallGrid.append(root);
+      tile = { root, media, avatar, status };
+      groupTiles.set(participant.id, tile);
+    }
+    const peer = current.media?.peers.get(participant.id);
+    const stream = local ? current.screenStream || current.localStream : peer?.stream;
+    if (tile.media.srcObject !== stream) {
+      tile.media.srcObject = stream || null;
+      if (stream) tile.media.play().catch(() => {
+        if (call === current) {
+          mediaBlocked = true;
+          els.callStatus.textContent = 'Tap the screen to enable audio/video';
+        }
+      });
+    }
+    const video = current.withVideo && participant.cameraOn && Boolean(stream?.getVideoTracks().length);
+    tile.media.hidden = !video;
+    tile.avatar.hidden = video;
+    tile.status.textContent = participant.muted ? 'Muted' : local ? 'You' : peer?.state === 'connected' ? 'Connected' : peer?.state === 'failed' ? 'Connection lost' : 'Connecting…';
+    tile.root.classList.toggle('local', local);
+    tile.root.classList.toggle('screen', Boolean(local && current.screenStream));
+  }
+  applySpeaker();
+}
+
+function renderGroupCallUi(current) {
+  const incoming = current.state === 'incoming';
+  const active = current.state === 'active';
+  els.callOverlay.hidden = Boolean(current.minimized);
+  els.callOverlay.classList.remove('video');
+  els.callOverlay.classList.add('group');
+  els.callPeerName.textContent = current.peerName;
+  els.callAvatar.textContent = initials(current.peerName);
+  els.callAvatar.style.background = avatarColor(current.peerName);
+  els.callAvatar.hidden = active;
+  els.callRemoteVideo.hidden = els.callLocalVideo.hidden = true;
+  els.groupCallGrid.hidden = !active;
+  els.callAccept.hidden = els.callDecline.hidden = !incoming;
+  els.callAccept.textContent = 'Join call';
+  els.callHangup.hidden = incoming;
+  els.callHangup.textContent = 'Leave call';
+  els.callMute.hidden = els.callDevices.hidden = els.callMinimize.hidden = !active;
+  els.callCamera.hidden = !active || !current.withVideo;
+  els.callShare.hidden = !active || !current.withVideo;
+  els.callMute.textContent = current.muted ? 'Unmute' : 'Mute';
+  els.callMute.setAttribute('aria-pressed', String(current.muted));
+  els.callCamera.textContent = current.cameraOn ? 'Camera off' : 'Camera on';
+  els.callCamera.setAttribute('aria-pressed', String(!current.cameraOn));
+  els.callShare.textContent = current.screenStream ? 'Stop sharing' : 'Share screen';
+  els.callTimer.hidden = !active;
+  const mode = current.withVideo ? 'video' : 'voice';
+  els.callStatus.textContent = incoming ? `${current.fromName} is inviting the group to a ${mode} call` : !active
+    ? 'Opening microphone' + (current.withVideo ? ' and camera…' : '…')
+    : current.participants.length < 2 ? 'Waiting for others to join…' : `Group ${mode} call · ${current.participants.length} people`;
+  if (active) renderGroupTiles(current);
+  if (active && mediaBlocked) els.callStatus.textContent = 'Tap the screen to enable audio/video';
+}
+
+function handleGroupCall(data, invite = false) {
+  if (!data?.channel || !Array.isArray(data.participants)) return;
+  const conversation = getConversation(data.channel);
+  if (conversation) conversation.call = data.ended ? null : data;
+  updateCallButtons(activeConversation());
+  if (call?.kind === 'group' && call.channel === data.channel) {
+    const current = call;
+    if (current.callId && current.callId !== data.callId) return;
+    if (data.ended) { endCall('Group call ended', null); return; }
+    const own = data.participants.find((p) => p.id === me.id);
+    if (current.state === 'joining') {
+      current.pendingSnapshot = data;
+      if (own?.connectionId === connectionId) { current.callId = data.callId; current.joined = true; }
+      return;
+    }
+    if (current.joined && (!own || own.connectionId !== connectionId)) {
+      endCall(own ? 'Call joined on another device' : 'You left the group call', null);
+      return;
+    }
+    if (current.state === 'incoming' && own) { endCall(null, null); return; }
+    current.participants = data.participants;
+    current.media?.sync(data.participants);
+    renderCallUi();
+    return;
+  }
+  if (!invite || data.reason !== 'started' || call || dismissedGroupCalls.has(data.callId) ||
+      data.participants.some((p) => p.id === me.id) || !navigator.mediaDevices?.getUserMedia) return;
+  call = {
+    kind: 'group', callId: data.callId, channel: data.channel, peerName: data.name,
+    fromName: data.fromName, withVideo: data.withVideo, role: 'callee', state: 'incoming',
+    snapshot: data, participants: data.participants, joined: false, muted: false, cameraOn: data.withVideo,
+    pendingGroupSignals: [], startedAt: 0,
+  };
+  renderCallUi();
+  startRing();
+  armRingTimeout();
+}
+
+async function startGroupCall(conversation, withVideo, snapshot = conversation.call) {
+  if (call?.kind === 'group' && call.callId === snapshot?.callId) {
+    if (call.state === 'incoming') { /* Accept this invitation below. */ }
+    else { call.minimized = false; renderCallUi(); return; }
+  } else if (call) { toast('Leave your current call first', 'error'); return; }
+  if (!connectionId || !navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === 'undefined') {
+    toast('Connect using HTTPS and allow microphone/camera access to call', 'error'); return;
+  }
+  clearRingTimeout();
+  const current = call = {
+    kind: 'group', callId: snapshot?.callId || null, channel: conversation.id, peerName: conversation.name,
+    withVideo: snapshot ? snapshot.withVideo : withVideo, state: 'joining', role: 'caller',
+    participants: [], joined: false, muted: false, cameraOn: snapshot ? snapshot.withVideo : withVideo,
+    pendingGroupSignals: [], pendingSnapshot: null, startedAt: 0, connectionId,
+  };
+  stopRing();
+  renderCallUi();
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia(mediaConstraints(current.withVideo));
+    if (call !== current) { stream.getTracks().forEach((track) => track.stop()); return; }
+    current.localStream = stream;
+    const result = await groupCallRequest(snapshot ? 'join' : 'start', current, { withVideo: current.withVideo });
+    current.callId = result.call.callId;
+    current.joined = true;
+    if (call !== current) { sendSignalBeacon(current, 'hangup'); return; }
+    current.state = 'active';
+    current.media = new GroupCallMedia({
+      userId: me.id, stream, rtcConfig: RTC_CONFIG,
+      send: (toId, type, data) => groupCallRequest('signal', current, { toId, type, data }),
+      onChange: () => { if (call === current) renderCallUi(); },
+    });
+    startCallTimer();
+    handleGroupCall(current.pendingSnapshot || result.call);
+    for (const signal of current.pendingGroupSignals.splice(0)) current.media.handleSignal(signal);
+    updateCallButtons(activeConversation());
+    renderCallUi();
+  } catch (error) {
+    if (call === current) {
+      endCall(null, 'hangup');
+      toast(error.name === 'NotAllowedError' ? 'Microphone/camera permission was blocked' : error.message, 'error');
+    }
+  }
+}
+
+function toggleGroupCamera() {
+  if (call?.kind !== 'group' || !call.localStream || !call.withVideo) return;
+  call.cameraOn = !call.cameraOn;
+  call.localStream.getVideoTracks().forEach((track) => { track.enabled = call.cameraOn; });
+  if (call.screenStream) call.screenStream.getVideoTracks().forEach((track) => { track.enabled = call.cameraOn; });
+  const own = call.participants.find((p) => p.id === me.id);
+  if (own) own.cameraOn = call.cameraOn;
+  groupCallRequest('update', call, { cameraOn: call.cameraOn }).catch(() => {});
+  renderCallUi();
 }
 
 function stopRing() {
@@ -1975,10 +2182,16 @@ function startCallTimer() {
 function renderCallUi() {
   if (!call) {
     els.callOverlay.hidden = true;
-    els.callOverlay.classList.remove('video');
+    els.callOverlay.classList.remove('video', 'group');
     return;
   }
+  if (call.kind === 'group') { renderGroupCallUi(call); return; }
 
+  els.callOverlay.classList.remove('group');
+  els.groupCallGrid.hidden = true;
+  els.callCamera.hidden = els.callMinimize.hidden = true;
+  els.callAccept.textContent = 'Accept';
+  els.callHangup.textContent = 'Hang up';
   els.callOverlay.hidden = false;
   els.callPeerName.textContent = call.peerName;
   els.callAvatar.textContent = initials(call.peerName);
@@ -2024,19 +2237,17 @@ let mediaBlocked = false;
 async function resumeCallMedia() {
   const current = call;
   if (!current) return;
-  const media = current.withVideo ? els.callRemoteVideo : els.callRemoteAudio;
-  if (!media.srcObject) return;
-  try {
-    await media.play();
-    if (mediaBlocked && call) {
-      mediaBlocked = false;
-      renderCallUi();
-    }
-  } catch {
-    if (!call) return;
-    mediaBlocked = true;
-    if (call.state === 'active') els.callStatus.textContent = 'Tap the screen to enable audio/video';
-  }
+  const players = current.kind === 'group'
+    ? [...groupTiles.entries()].filter(([id]) => id !== me.id).map(([, tile]) => tile.media)
+    : [current.withVideo ? els.callRemoteVideo : els.callRemoteAudio];
+  const media = players.filter((player) => player.srcObject);
+  if (!media.length) return;
+  const wasBlocked = mediaBlocked;
+  const results = await Promise.allSettled(media.map((player) => player.play()));
+  if (call !== current) return;
+  mediaBlocked = results.some((result) => result.status === 'rejected');
+  if (mediaBlocked && current.state === 'active') els.callStatus.textContent = 'Tap the screen to enable audio/video';
+  else if (wasBlocked) renderCallUi();
 }
 
 function attachRemoteStream() {
@@ -2132,6 +2343,15 @@ async function sendSignal(type, data) {
 
 function sendSignalBeacon(target, type) {
   if (!target) return;
+  if (target.kind === 'group') {
+    if (!target.joined || !target.callId) return;
+    fetch('/api/group-calls/leave', {
+      method: 'POST', credentials: 'same-origin', keepalive: true,
+      headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+      body: JSON.stringify({ channel: target.channel, callId: target.callId, connectionId: target.connectionId || connectionId }),
+    }).catch(() => {});
+    return;
+  }
   try {
     fetch(apiUrl('/api/signal'), {
       method: 'POST',
@@ -2154,6 +2374,10 @@ function sendSignalBeacon(target, type) {
 function cleanupCall(current) {
   if (!current) return;
   mediaBlocked = false;
+  current.media?.close();
+  for (const tile of groupTiles.values()) tile.media.srcObject = null;
+  groupTiles.clear();
+  els.groupCallGrid.replaceChildren();
   clearRingTimeout(current);
   clearConnectTimeout(current);
   if (current.iceTimer) clearTimeout(current.iceTimer);
@@ -2178,14 +2402,18 @@ function endCall(message, signalType) {
   stopCallTimer();
   if (signalType) sendSignalBeacon(current, signalType);
   earlyIce.delete(`${current.peerId}:${current.callId}`);
+  if (current.kind === 'group') dismissedGroupCalls.add(current.callId);
   call = null;
   cleanupCall(current);
   renderCallUi();
+  updateCallButtons(activeConversation());
   if (message) setStatus(message, 'offline');
   restoreConnectionStatus();
 }
 
 async function startCall(withVideo) {
+  const selected = activeConversation();
+  if (selected?.type === 'group') return startGroupCall(selected, withVideo);
   const conversation = activePeerConversation();
   if (!conversation) return;
   if (call) {
@@ -2270,6 +2498,11 @@ async function flushPendingIce() {
 
 async function acceptCall() {
   if (!call || call.state !== 'incoming') return;
+  if (call.kind === 'group') {
+    const conversation = getConversation(call.channel);
+    if (conversation) return startGroupCall(conversation, call.withVideo, call.snapshot);
+    return endCall('This group is no longer available', null);
+  }
   stopRing();
 
   try {
@@ -2313,6 +2546,11 @@ function toggleMute() {
   call.localStream.getAudioTracks().forEach((track) => {
     track.enabled = !call.muted;
   });
+  if (call.kind === 'group') {
+    const own = call.participants.find((p) => p.id === me.id);
+    if (own) own.muted = call.muted;
+    groupCallRequest('update', call, { muted: call.muted }).catch(() => {});
+  }
   renderCallUi();
 }
 
@@ -2323,12 +2561,19 @@ async function stopScreenShare() {
   current.screenStream = null;
   const camera = current.localStream?.getVideoTracks()[0] || null;
   try {
-    await current.videoSender?.replaceTrack(camera);
+    if (current.kind === 'group') await current.media?.replaceVideoTrack(camera);
+    else await current.videoSender?.replaceTrack(camera);
   } catch {
     // The sender may already be closed.
   }
   screen.getTracks().forEach((track) => track.stop());
   if (call === current) {
+    if (current.kind === 'group') {
+      current.cameraOn = Boolean(camera?.enabled);
+      const own = current.participants.find((p) => p.id === me.id);
+      if (own) own.cameraOn = current.cameraOn;
+      groupCallRequest('update', current, { cameraOn: current.cameraOn }).catch(() => {});
+    }
     els.callLocalVideo.srcObject = current.localStream;
     els.callLocalVideo.play().catch(() => {});
     renderCallUi();
@@ -2345,15 +2590,24 @@ async function toggleScreenShare() {
     toast('Screen sharing is not available in this browser', 'error');
     return;
   }
+  const current = call;
   try {
     const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
-    if (!call || call.state !== 'active') {
+    if (call !== current || current.state !== 'active') {
       stream.getTracks().forEach((track) => track.stop());
       return;
     }
     const track = stream.getVideoTracks()[0];
-    await call.videoSender?.replaceTrack(track);
-    call.screenStream = stream;
+    if (current.kind === 'group') await current.media?.replaceVideoTrack(track);
+    else await current.videoSender?.replaceTrack(track);
+    if (call !== current) { stream.getTracks().forEach((item) => item.stop()); return; }
+    current.screenStream = stream;
+    if (current.kind === 'group') {
+      current.cameraOn = true;
+      const own = current.participants.find((p) => p.id === me.id);
+      if (own) own.cameraOn = true;
+      groupCallRequest('update', current, { cameraOn: true }).catch(() => {});
+    }
     track.addEventListener('ended', () => {
       if (call?.screenStream === stream) stopScreenShare();
     });
@@ -2481,19 +2735,18 @@ function connect() {
     } catch {
       // Ignore malformed payloads.
     }
-    source.close();
-    source = null;
-    me.name = '';
-    me.fullName = '';
-    localStorage.removeItem(NAME_KEY);
-    localStorage.removeItem(FULL_NAME_KEY);
-    setStatus('Choose another name.', 'error');
-    toast(`The name "${taken || 'you picked'}" is already in use. Pick a different one.`, 'error');
-    askForName(true);
+    clearAccountState();
+    showAuth('login');
+    const message = `The name "${taken || 'on this account'}" is already online. Use another account or try again after it disconnects.`;
+    els.authError.textContent = message;
+    els.authError.hidden = false;
+    setStatus('This account name is already online.', 'error');
   });
 
   source.addEventListener('init', (event) => {
     const data = JSON.parse(event.data);
+    connectionId = data.connectionId;
+    if (call?.kind === 'group') call.connectionId = connectionId;
     if (data.config) {
       if (data.config.maxName) MAX_NAME = data.config.maxName;
       if (data.config.maxFullName) MAX_FULL_NAME = data.config.maxFullName;
@@ -2507,6 +2760,11 @@ function connect() {
     renderUsers();
     renderFriends();
     applyConversations(data.conversations);
+    if (call?.kind === 'group' && call.joined) {
+      const ongoing = getConversation(call.channel)?.call;
+      if (ongoing) handleGroupCall(ongoing);
+      else endCall('Group call ended while disconnected', null);
+    }
     applyDeepLink(pendingDeepLink || parseDeepLink());
   });
 
@@ -2608,6 +2866,18 @@ function connect() {
       return;
     }
     handleSignal(signal);
+  });
+
+  source.addEventListener('group-call', (event) => {
+    try { handleGroupCall(JSON.parse(event.data), true); } catch { /* Ignore malformed updates. */ }
+  });
+  source.addEventListener('group-signal', (event) => {
+    try {
+      const signal = JSON.parse(event.data);
+      if (call?.kind !== 'group' || call.channel !== signal.channel || (call.callId && call.callId !== signal.callId)) return;
+      if (call.media) call.media.handleSignal(signal);
+      else if (call.state === 'joining' && call.pendingGroupSignals.length < 128) call.pendingGroupSignals.push(signal);
+    } catch { /* Ignore malformed signals. */ }
   });
 
   source.addEventListener('error', () => {
@@ -3160,6 +3430,7 @@ async function leaveGroup() {
 
   try {
     await postJson('/api/groups/leave', { id: me.id, channel: conversation.id });
+    if (call?.kind === 'group' && call.channel === conversation.id) endCall(null, null);
     conversations = conversations.filter((entry) => entry.id !== conversation.id);
     if (activeId === conversation.id) {
       const next = getConversation('general') || sortedConversations()[0];
@@ -3313,7 +3584,7 @@ function callStateLabel(entry) {
 function renderCallHistory() {
   els.callsList.replaceChildren();
   if (callLog.length === 0) {
-    els.callsList.append(make('li', 'info-empty', 'No calls yet. Open a private chat to start an audio or video call.'));
+    els.callsList.append(make('li', 'info-empty', 'No calls yet. Open a private or group chat to start a voice or video call.'));
     return;
   }
 
@@ -3328,7 +3599,7 @@ function renderCallHistory() {
     );
     main.append(
       title,
-      make('span', 'result-name', `${entry.withVideo ? 'Video' : 'Audio'} · ${callStateLabel(entry)}`),
+      make('span', 'result-name', `${entry.kind === 'group' ? 'Group ' : ''}${entry.withVideo ? 'Video' : 'Audio'} · ${callStateLabel(entry)}`),
     );
     li.append(main);
     els.callsList.append(li);
@@ -3389,7 +3660,7 @@ async function openDevices() {
 }
 
 function applySpeaker() {
-  const media = [els.callRemoteAudio, els.callRemoteVideo];
+  const media = [els.callRemoteAudio, els.callRemoteVideo, ...[...groupTiles.values()].map((tile) => tile.media)];
   for (const element of media) {
     if (settings.speaker && element.setSinkId) {
       element.setSinkId(settings.speaker).catch(() => {});
@@ -3784,6 +4055,8 @@ els.toggleNotify.addEventListener('click', toggleNotifications);
 function clearAccountState() {
   if(source) { source.close(); source=null; }
   if(call) endCall('Signed out', null);
+  connectionId = null;
+  dismissedGroupCalls.clear();
   for(const item of uploads) { item.cancelled=true; item.xhr?.abort(); }
   uploads=[]; uploadInProgress=false; renderUploads();
   replyTo=null; editingId=null; searchQuery=''; selectedMessageId=null; typingByChannel.clear(); sentReads.clear();
@@ -3967,6 +4240,14 @@ els.callDecline.addEventListener('click', () => endCall('Call declined', 'declin
 els.callHangup.addEventListener('click', () => endCall('Call ended', 'hangup'));
 els.callMute.addEventListener('click', toggleMute);
 els.callOverlay.addEventListener('click', () => resumeCallMedia());
+els.callCamera.addEventListener('click', toggleGroupCamera);
+els.callMinimize.addEventListener('click', () => {
+  if (call?.kind === 'group') { call.minimized = true; renderCallUi(); }
+});
+els.groupCallJoin.addEventListener('click', () => {
+  const conversation = activeConversation();
+  if (conversation?.type === 'group' && conversation.call) startGroupCall(conversation, conversation.call.withVideo);
+});
 
 window.addEventListener('pagehide', () => {
   if (call) sendSignalBeacon(call, 'hangup');

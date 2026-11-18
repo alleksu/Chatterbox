@@ -11,14 +11,16 @@ npm.cmd start
 
 If PowerShell blocks `npm.ps1` ("running scripts is disabled on this system"), use `npm.cmd start` or `node server.js`.
 
-The server binds to `0.0.0.0` and prints the addresses to open. When `certs/cert.pem` and `certs/key.pem` exist it starts with HTTPS automatically:
+When certificates already exist in `certs/`, `npm.cmd start` automatically uses HTTPS and accepts HTTP links on the same port. Set `HTTPS=0` explicitly only for HTTP development on this computer.
+
+The server binds to `0.0.0.0` and prints the addresses to open:
 
 ```
   On this machine:  https://localhost:3000
   On the LAN:       https://192.168.1.23:3000
 ```
 
-Open `http://localhost:3000` to log in with your Username and Password. New visitors see **Log in to Chatterbox** first and can select **No account? Create one** to register with Name, Username and Password. For another device on the LAN, **start in HTTPS mode** (`npm run cert` then `npm run start:https`) before registering or logging in. Use **Invite** in the sidebar to copy the address and share it.
+Open `http://localhost:3000` to log in with your Username and Password. New visitors see **Log in to Chatterbox** first and can select **No account? Create one** to register with Name, Username and Password. For another device on the LAN, generate certificates once with `npm run cert` if they do not already exist, then run `npm start`. Use **Invite** in the sidebar to copy the address and share it.
 
 ## HTTPS for phone calls
 
@@ -31,6 +33,8 @@ npm run cert
 Use `npm.cmd run cert` / `npm.cmd run start:https` if PowerShell blocks npm scripts. The certificate script uses OpenSSL (Git for Windows includes it) and creates `certs/cert.pem` and `certs/key.pem` with `localhost` and your current LAN addresses. After that, `npm start` serves HTTPS automatically. Open the printed `https://` address and accept the self-signed certificate warning once per device, or configure each device to trust the issuing local certificate authority. Re-run `npm run cert` if your LAN IP changes.
 
 To force HTTPS or HTTP explicitly, use `npm run start:https`, `HTTPS=1 node server.js`, or `HTTPS=0 node server.js`.
+
+HTTPS mode uses a single port (3000 by default). Open `http://<computer-IP>:3000` or `https://<computer-IP>:3000` on your phone: an HTTP link automatically redirects to Chatterbox over HTTPS on the same port, preserving its path and query. No diagnostic port or separate connection page is needed. Browsers still enforce certificate trust; the redirect cannot bypass a self-signed certificate warning. Plain HTTP does not accept sign-in credentials or serve chat APIs.
 
 You can also supply your own certificate:
 
@@ -53,6 +57,7 @@ HTTPS=1 TLS_CERT=C:\certs\cert.pem TLS_KEY=C:\certs\key.pem node server.js
 - **Drafts** - unsent text is saved per conversation in local storage and shown in the sidebar.
 - **Files & images** - use the paperclip, paste, or drag files onto the composer. Attach a file and type a message to send both together in one action. Uploads show progress and can be cancelled. Images get an inline preview.
 - **Audio & video calls** - open a private message and use the header buttons. Calls are peer-to-peer WebRTC and stay on the LAN.
+- **Group voice & video calls** - open a group and use the phone or camera button to start a call. Members receive an invitation, and can join an ongoing call from the group banner. Up to 8 people can join, with a participant grid, microphone mute, camera toggle, screen sharing and a return-to-chat control. Leaving does not end the call for the other members; the last person leaving ends it. Signalling is restricted to authenticated group members and the device that joined. A brief connection loss has a 10-second reconnect grace period. Group calls also appear in call history.
 - **Call extras** - screen sharing during video calls, microphone/camera/speaker selection, ring timeout, ICE restart, and a per-device call history.
 - **Replies** - quote a message so the thread stays readable.
 - **Reactions** - tap the smiley on any message to react. Reactions are live for everyone in the conversation.
@@ -111,6 +116,8 @@ See [`COPY_INTO_VSCODE.md`](COPY_INTO_VSCODE.md) for the manual-copy steps, back
 ## Verification and operating limits
 
 `npm.cmd test` runs migration and HTTP integration tests on disposable databases. `npm.cmd run test:https` checks TLS verification and Secure cookies using a disposable certificate; it requires OpenSSL (`OPENSSL` can specify its executable). Physical LAN access, browser accessibility/responsiveness, camera/microphone permissions and real WebRTC media need manual verification.
+
+Group-call tests cover three-person signalling, private membership, CSRF, device ownership, capacity, ICE ordering, deterministic offer/answer roles, late joins, leaving, history, reconnects, screen-track replacement and media cleanup. For browser development, `node scripts/serve-group-call-check.mjs` prints a temporary loopback-only fixture URL. It uses the actual UI with two automatic peers and synthetic audio/video, without using real accounts, microphones or cameras; choose the fixture group and start either call mode. It reports received RTP streams in the console and closes after 15 minutes. This fixture is separate from normal Chatterbox access on port 3000.
 
 Sessions expire after seven days. HTTP authentication is allowed only from loopback for development; LAN APIs require direct HTTPS. The server rejects cross-origin requests and requires a CSRF token for authenticated mutations. Message, signalling, upload and connection budgets bound resource use. Limits are process-local and reset on restart. Chat remains transient; account/session persistence does not make chat history durable.
 

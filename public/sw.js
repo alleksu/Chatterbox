@@ -1,10 +1,11 @@
-const CACHE_NAME = 'chatterbox-shell-v6';
+const CACHE_NAME = 'chatterbox-shell-v8';
 const SHELL = [
   '/',
   '/index.html',
   '/styles.css',
   '/app.js',
   '/auth-client.js',
+  '/group-call-media.js',
   '/logo.svg',
   '/icon-192.png',
   '/icon-512.png',

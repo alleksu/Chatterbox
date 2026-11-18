@@ -33,7 +33,7 @@ async function startServer() {
   serverError = '';
   server = spawn(process.execPath, ['server.js'], {
     cwd: root,
-    env: { ...process.env, HTTPS:'0', CHATTERBOX_HOST:'127.0.0.1', PORT: String(port), CHATTERBOX_DB_PATH: dbPath },
+    env: { ...process.env, HTTPS:'0', STUN_PORT:'0', CHATTERBOX_HOST:'127.0.0.1', PORT: String(port), CHATTERBOX_DB_PATH: dbPath },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   server.stderr.on('data', (buf) => { serverError += String(buf); });
@@ -141,6 +141,15 @@ async function main() {
     assert.equal(r.status, 200, 'server remains alive after malformed requests');
 
     const post = (route, identity, body) => api(route,{method:'POST',cookie:identity.cookie,csrf:identity.csrf,body});
+    assert.equal((await post('/api/groups/leave',charlie,{id:alice.user.id,channel:groupId})).status,403,'outsider cannot remove a member by spoofing their ID');
+    assert.deepEqual((await api('/api/friends',{cookie:alice.cookie})).data.friends,[]);
+    assert.equal((await post('/api/friends',alice,{friendId:alice.user.id})).status,400);
+    assert.equal((await post('/api/friends',alice,{friendId:bob.user.id})).status,200);
+    assert.equal((await api('/api/friends',{cookie:bob.cookie})).data.friends[0].id,alice.user.id,'friendships are mutual');
+    assert.deepEqual((await api('/api/friends',{cookie:charlie.cookie})).data.friends,[],'friends are private');
+    assert.equal((await post('/api/friends/remove',bob,{friendId:alice.user.id})).status,200);
+    assert.deepEqual((await api('/api/friends',{cookie:alice.cookie})).data.friends,[]);
+    assert.equal((await post('/api/friends',alice,{friendId:bob.user.id})).status,200);
     for (const raw of ['[]','true','42','"string"','{','x'.repeat(40000)]) {
       r=await api('/api/messages',{method:'POST',cookie:alice.cookie,csrf:alice.csrf,raw});
       assert.ok([400,413].includes(r.status), 'malformed or oversized JSON rejected');
@@ -171,8 +180,47 @@ async function main() {
     assert.equal((await fetch(base+fileRoute)).status,401);
     assert.equal((await fetch(base+'/events')).status,401);
     const streamAbort=new AbortController();
-    const events=await fetch(base+'/events',{headers:{Cookie:bob.cookie},signal:streamAbort.signal});assert.equal(events.status,200);const reader=events.body.getReader();await reader.read();
-    const aliceAbort=new AbortController(); const aliceStream=await fetch(base+'/events',{headers:{Cookie:alice.cookie},signal:aliceAbort.signal}); const aliceReader=aliceStream.body.getReader(); await aliceReader.read();
+    const events=await fetch(base+'/events',{headers:{Cookie:bob.cookie},signal:streamAbort.signal});assert.equal(events.status,200);const reader=events.body.getReader();
+    const readInit=async streamReader=>{
+      const decoder=new TextDecoder();let text='';
+      for(;;){const chunk=await streamReader.read();if(chunk.done)throw new Error('SSE ended before init');text+=decoder.decode(chunk.value,{stream:true});const match=text.match(/event: init\ndata: ([^\n]+)\n\n/);if(match)return JSON.parse(match[1]);}
+    };
+    const bobInit=await readInit(reader);
+    const aliceAbort=new AbortController(); const aliceStream=await fetch(base+'/events',{headers:{Cookie:alice.cookie},signal:aliceAbort.signal}); const aliceReader=aliceStream.body.getReader(); const aliceInit=await readInit(aliceReader);
+    const groupAction=(action,identity,connectionId,body)=>post('/api/group-calls/'+action,identity,{channel:groupId,connectionId,...body});
+    assert.equal((await api('/api/group-calls/start',{method:'POST',body:{channel:groupId,connectionId:aliceInit.connectionId,withVideo:false}})).status,401);
+    assert.equal((await api('/api/group-calls/start',{method:'POST',cookie:alice.cookie,body:{channel:groupId,connectionId:aliceInit.connectionId,withVideo:false}})).status,403);
+    assert.equal((await groupAction('start',alice,bobInit.connectionId,{withVideo:false})).status,409,'cannot claim another device connection');
+    const voice=await groupAction('start',alice,aliceInit.connectionId,{withVideo:false});assert.equal(voice.status,200);assert.equal(voice.data.call.withVideo,false);
+    const voiceId=voice.data.call.callId;
+    assert.equal((await groupAction('join',charlie,aliceInit.connectionId,{callId:voiceId})).status,403,'nonmember cannot join by claiming an ID');
+    assert.equal((await groupAction('join',bob,bobInit.connectionId,{callId:voiceId})).data.call.participants.length,2);
+    assert.equal((await groupAction('leave',alice,aliceInit.connectionId,{callId:voiceId})).status,200);
+    assert.equal((await groupAction('join',bob,bobInit.connectionId,{callId:voiceId})).data.call.participants.length,1,'creator leaving does not end the call');
+    assert.equal((await groupAction('leave',bob,bobInit.connectionId,{callId:voiceId})).status,200);
+    assert.equal((await groupAction('join',alice,aliceInit.connectionId,{callId:voiceId})).status,409,'ended calls cannot be rejoined');
+    const conference=await post('/api/groups',alice,{nameValue:'Video team',members:[bob.user.id,charlie.user.id]});assert.equal(conference.status,200);
+    const channel=conference.data.group.channel;
+    const charlieAbort=new AbortController();const charlieStream=await fetch(base+'/events',{headers:{Cookie:charlie.cookie},signal:charlieAbort.signal});const charlieReader=charlieStream.body.getReader();const charlieInit=await readInit(charlieReader);
+    const video=await groupAction('start',alice,aliceInit.connectionId,{channel,withVideo:true});assert.equal(video.status,200);
+    const groupCallId=video.data.call.callId;
+    assert.equal((await groupAction('join',bob,bobInit.connectionId,{channel,callId:groupCallId})).status,200);
+    assert.equal((await groupAction('join',charlie,charlieInit.connectionId,{channel,callId:groupCallId})).data.call.participants.length,3);
+    const conferenceUsers=[{...alice,connectionId:aliceInit.connectionId},{...bob,connectionId:bobInit.connectionId},{...charlie,connectionId:charlieInit.connectionId}].sort((a,b)=>a.user.id<b.user.id?-1:1);
+    for(let i=0;i<conferenceUsers.length;i++)for(let j=i+1;j<conferenceUsers.length;j++){
+      const from=conferenceUsers[i],to=conferenceUsers[j];
+      assert.equal((await groupAction('signal',from,from.connectionId,{channel,callId:groupCallId,toId:to.user.id,type:'offer',data:{type:'offer',sdp:'v=0\r\nm=video'}})).status,200);
+      assert.equal((await groupAction('signal',to,to.connectionId,{channel,callId:groupCallId,toId:from.user.id,type:'answer',data:{type:'answer',sdp:'v=0\r\nm=video'}})).status,200);
+    }
+    assert.equal((await groupAction('update',alice,aliceInit.connectionId,{channel,callId:groupCallId,muted:true,cameraOn:false})).status,200);
+    assert.equal((await groupAction('leave',alice,aliceInit.connectionId,{channel,callId:groupCallId})).status,200);
+    assert.equal((await groupAction('leave',charlie,charlieInit.connectionId,{channel,callId:groupCallId})).status,200);
+    const remaining=await groupAction('join',bob,bobInit.connectionId,{channel,callId:groupCallId});assert.deepEqual(remaining.data.call.participants.map(p=>p.id),[bob.user.id]);
+    assert.equal((await post('/api/groups/leave',bob,{id:alice.user.id,channel})).status,200,'leaving uses the authenticated member, ignoring a spoofed ID');
+    assert.equal((await groupAction('join',alice,aliceInit.connectionId,{channel,callId:groupCallId})).status,409,'leaving the group also ends its last active call participant');
+    assert.equal((await post('/api/messages',alice,{channel,text:'Still a member'})).status,200,'spoofed ID did not remove Alice');
+    const history=await api('/api/calls',{cookie:alice.cookie});assert.ok(history.data.calls.some(entry=>entry.kind==='group'&&entry.callId===groupCallId&&entry.endedAt));
+    console.log('PASS: authenticated group voice/video endpoints, CSRF, three-person signaling, private membership, late joining, leaving, logout cleanup and group history');
     const signal={toId:bob.user.id,callId:'test-call',type:'offer',data:{type:'offer',sdp:'v=0\r\nm=audio'}};
     assert.equal((await post('/api/signal',alice,signal)).status,200);
     assert.equal((await post('/api/signal',charlie,{...signal,type:'hangup'})).status,403);
@@ -181,6 +229,10 @@ async function main() {
     assert.equal((await post('/api/signal',bob,{toId:alice.user.id,callId:'test-call',type:'answer',data:{type:'answer',sdp:'v=0'}})).status,200);
     assert.equal((await post('/api/signal',alice,signal)).status,200,'caller ICE renegotiation');
     assert.equal((await post('/api/signal',alice,{...signal,type:'hangup'})).status,200);
+    const cleanupCall=await groupAction('start',charlie,charlieInit.connectionId,{channel,withVideo:false});assert.equal(cleanupCall.status,200);
+    assert.equal((await post('/api/auth/logout',charlie,{})).status,200,'logout removes the last group participant');
+    assert.equal((await groupAction('join',alice,aliceInit.connectionId,{channel,callId:cleanupCall.data.call.callId})).status,409);
+    charlieAbort.abort();await charlieReader.cancel().catch(()=>{});
     aliceAbort.abort(); await aliceReader.cancel().catch(()=>{});
     assert.equal((await post('/api/signal',alice,signal)).status,409);
     streamAbort.abort();await reader.cancel().catch(()=>{});
@@ -190,6 +242,7 @@ async function main() {
     assert.equal(r.status, 401, 'bad password rejected');
     await stopServer();
     await startServer();
+    assert.equal((await api('/api/friends',{cookie:alice.cookie})).data.friends[0].id,bob.user.id,'friendships survive restart');
     assert.deepEqual((await auth.session()).user, alice.user, 'client session restore survives a server restart');
     r = await api('/api/auth/me', { cookie: alice.cookie });
     assert.equal(r.status, 200, 'session survives restart');

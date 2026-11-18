@@ -1,5 +1,4 @@
 import http from 'node:http';
-import https from 'node:https';
 import dgram from 'node:dgram';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -11,8 +10,10 @@ import {
   registerUser, removeFriend, validPassword,
 } from './auth-db.mjs';
 import { fileURLToPath } from 'node:url';
+import { createSinglePortHttpsServer } from './single-port-https.mjs';
+import { GroupCalls } from './group-calls.mjs';
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT) || 3000
 const HOST = process.env.CHATTERBOX_HOST || '0.0.0.0';
 const MAX_HISTORY = 300;
 const MAX_TEXT = 4000;
@@ -35,11 +36,12 @@ const publicDir = path.join(appDir, 'public');
 const filesDir = fs.mkdtempSync(path.join(os.tmpdir(), `chatterbox-files-${PORT}-`));
 const tlsCertPath = path.resolve(process.env.TLS_CERT || path.join(appDir, 'certs', 'cert.pem'));
 const tlsKeyPath = path.resolve(process.env.TLS_KEY || path.join(appDir, 'certs', 'key.pem'));
-const hasLocalCerts = fs.existsSync(tlsCertPath) && fs.existsSync(tlsKeyPath);
-const httpsSetting = process.env.HTTPS;
-const USE_HTTPS = httpsSetting === undefined || httpsSetting === ''
-  ? hasLocalCerts
-  : httpsSetting === '1' || String(httpsSetting).toLowerCase() === 'true';
+// A normal npm start reuses existing certificates without an extra HTTPS step.
+// HTTPS=0 remains an explicit opt-out for loopback development and HTTP tests.
+const httpsSetting = String(process.env.HTTPS || '').trim().toLowerCase();
+const USE_HTTPS = httpsSetting
+  ? httpsSetting === '1' || httpsSetting === 'true'
+  : fs.existsSync(tlsCertPath) && fs.existsSync(tlsKeyPath);
 const scheme = USE_HTTPS ? 'https' : 'http';
 
 fs.mkdirSync(filesDir, { recursive: true });
@@ -55,6 +57,20 @@ const files = new Map();        // fileId -> { id, name, type, size, path, chann
 const typing = new Map();       // channelId -> Map<userId, expiresAt>
 const callSessions = new Map(); // callId -> call metadata
 const callHistory = new Map();  // userId -> [callId]
+const groupCalls = new GroupCalls({
+  getGroup: (channel) => channel.startsWith('group:') ? groups.get(channel.slice(6)) : null,
+  isConnected: (id) => { const client = clients.get(id); return Boolean(client && liveClient(client)); },
+  ownsConnection: (auth, id) => {
+    const client = clients.get(id);
+    return Boolean(client && client.userId === auth.id && client.sessionId === auth.sessionId && liveClient(client));
+  },
+  send: (id, event, data) => {
+    const client = clients.get(id);
+    if (client && liveClient(client)) client.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  },
+  broadcast: (channel, data) => deliverToChannel(parseChannel(channel), 'group-call', data),
+  historyChanged: (ids) => { for (const id of ids) writeToUser(id, 'calls', { calls: callsFor(id) }); },
+});
 let nextConnectionId = 1;
 
 const MIME = {
@@ -366,6 +382,7 @@ function conversationsFor(userId) {
       name: group.name,
       groupId: group.id,
       members: [...group.members].map((id) => ({ id, name: userName(id) })),
+      call: groupCalls.forChannel(`group:${group.id}`),
       history: messages,
       lastTime: lastMessageTime(messages),
     });
@@ -668,7 +685,9 @@ function handleEvents(req, res) {
 
   const connectionId = nextConnectionId++;
   clients.set(connectionId, { res, userId, name, fullName, sessionId: req.auth.sessionId, expiresAt: req.auth.expiresAt });
+  groupCalls.reconnect(req.auth, connectionId);
   const init = {
+    connectionId,
     conversations: conversationsFor(userId),
     users: onlineUsers(),
     friends: friendsFor(userId),
@@ -681,6 +700,7 @@ function handleEvents(req, res) {
       maxFullName: MAX_FULL_NAME,
       maxGroupName: MAX_GROUP_NAME,
       stunPort: process.env.STUN_PORT === '0' ? 0 : STUN_PORT,
+      maxGroupCallParticipants: groupCalls.maxParticipants,
     },
   };
   res.write(`event: init\ndata: ${JSON.stringify(init)}\n\n`);
@@ -690,6 +710,7 @@ function handleEvents(req, res) {
 
   req.on('close', () => {
     clients.delete(connectionId);
+    groupCalls.disconnect(connectionId);
     clearTypingForUser(userId);
     broadcast('presence', { users: onlineUsers() });
     refreshAllFriends();
@@ -947,8 +968,7 @@ async function handleLeaveGroup(req, res) {
   const { body, error } = await readBodyOrFail(req, res);
   if (error) return;
 
-  const userId = cleanText(body.id, 64);
-  if (!userId) return send(res, 400, { error: 'Missing sender id' });
+  const userId = req.auth.id;
 
   const info = parseChannel(body.channel);
   const group = info?.type === 'group'
@@ -957,6 +977,7 @@ async function handleLeaveGroup(req, res) {
   if (!group) return send(res, 404, { error: 'Group not found' });
   if (!group.members.has(userId)) return send(res, 403, { error: 'You are not in this group' });
 
+  groupCalls.leaveGroup(userId, `group:${group.id}`);
   group.members.delete(userId);
   const remaining = [...group.members];
 
@@ -1267,7 +1288,9 @@ function callsFor(userId) {
       endedAt: record.endedAt,
       duration: record.duration,
     }))
-    .sort((a, b) => b.createdAt - a.createdAt);
+    .concat(groupCalls.historyFor(userId))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, MAX_CALL_HISTORY);
 }
 
 function rememberCallFor(userId, callId) {
@@ -1374,6 +1397,12 @@ async function handleSignal(req, res) {
   send(res, 200, { ok: true });
 }
 
+async function handleGroupCall(req, res, action) {
+  const { body, error } = await readBodyOrFail(req, res);
+  if (error) return;
+  send(res, 200, groupCalls.execute(action, req.auth, body));
+}
+
 // Registration and login are deliberately separate from the legacy chat routes.
 // Never trust id/name/fromId/userId values provided by the browser.
 const loginAttempts = new Map();
@@ -1440,6 +1469,7 @@ async function handleLogin(req, res) {
   sessionResponse(req, res, user);
 }
 function handleLogout(req, res) {
+  groupCalls.leaveSession(req.auth);
   for(const record of callSessions.values()) {
     if(!record.endedAt && [record.fromId,record.toId].includes(req.auth.id)) {
       const toId=record.fromId===req.auth.id?record.toId:record.fromId;
@@ -1489,8 +1519,9 @@ function requestHandler(req, res) {
     req.auth = authenticateRequest(req);
     if (!req.auth) return send(res, 401, { error: 'Please log in.' });
     if (!requireSecureLogin(req,res)) return;
-    const limit = pathname === '/api/files' ? 20 : pathname === '/api/signal' ? 600 : 240;
-    if(!rateLimit(req, pathname === '/api/files' ? 'files' : pathname === '/api/signal' ? 'signals' : 'api',limit,60000)) return send(res,429,{error:'Too many requests. Try again shortly.'}, {'Retry-After':'60'});
+    const signalling = pathname === '/api/signal' || pathname === '/api/group-calls/signal';
+    const limit = pathname === '/api/files' ? 20 : signalling ? 600 : 240;
+    if(!rateLimit(req, pathname === '/api/files' ? 'files' : signalling ? 'signals' : 'api',limit,60000)) return send(res,429,{error:'Too many requests. Try again shortly.'}, {'Retry-After':'60'});
     if (req.method === 'POST' && !validCsrf(req)) return send(res, 403, { error: 'Invalid session security token.' });
   }
   if (req.method === 'GET' && pathname === '/api/auth/me') {
@@ -1508,6 +1539,7 @@ function requestHandler(req, res) {
   if (req.method === 'POST' && pathname === '/api/groups/leave') return handleLeaveGroup(req, res);
   if (req.method === 'POST' && pathname === '/api/rooms') return handleCreateRoom(req, res);
   if (req.method === 'POST' && pathname === '/api/signal') return handleSignal(req, res);
+  if (req.method === 'POST' && /^\/api\/group-calls\/(start|join|leave|update|signal)$/.test(pathname)) return handleGroupCall(req, res, pathname.split('/').pop());
   if (req.method === 'POST' && pathname === '/api/files') return handleFileUpload(req, res);
   if (req.method === 'POST' && pathname === '/api/reactions') return handleReactions(req, res);
   if (req.method === 'POST' && pathname === '/api/read-receipt') return handleReadReceipt(req, res);
@@ -1589,10 +1621,11 @@ function safeRequestHandler(req, res) {
 }
 
 let server;
+const requestOptions = { requestTimeout: 30000, headersTimeout: 15000 };
 if (USE_HTTPS) {
   try {
-    server = https.createServer(
-      { cert: fs.readFileSync(tlsCertPath), key: fs.readFileSync(tlsKeyPath) },
+    server = createSinglePortHttpsServer(
+      { ...requestOptions, cert: fs.readFileSync(tlsCertPath), key: fs.readFileSync(tlsKeyPath), handshakeTimeout: 15000 },
       safeRequestHandler,
     );
   } catch (error) {
@@ -1600,7 +1633,7 @@ if (USE_HTTPS) {
     process.exit(1);
   }
 } else {
-  server = http.createServer(safeRequestHandler);
+  server = http.createServer(requestOptions, safeRequestHandler);
 }
 
 setInterval(() => {
@@ -1620,11 +1653,9 @@ setInterval(() => {
   }
 }, 2500).unref();
 
-server.requestTimeout=30000;
-server.headersTimeout=15000;
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`Port ${PORT} is already in use. Start with a different port, e.g. PORT=3001 npm start`);
+    console.error(`Port ${PORT} is already in use. Stop the existing Chatterbox process before restarting.`);
   } else {
     console.error(err);
   }
@@ -1640,7 +1671,10 @@ server.listen(PORT, HOST, () => {
   console.log(`Chatterbox is running${USE_HTTPS ? ' with HTTPS' : ''}. Open one of these on any device on the same network:\n`);
   console.log(`  On this machine:  ${scheme}://localhost:${PORT}`);
   for (const address of addresses) console.log(`  On the LAN:       ${scheme}://${address}:${PORT}`);
-  if (USE_HTTPS) console.log('\n  The certificate is self-signed unless you supplied your own. Accept the browser warning once per device.');
+  if (USE_HTTPS) {
+    console.log(`\n  HTTP links also open Chatterbox automatically: http://<LAN-IP>:${PORT} redirects to HTTPS on this same port.`);
+    console.log('  The certificate is self-signed unless you supplied your own. Your browser must trust it.');
+  }
   else console.log('\n  LAN registration and login require HTTPS. Run "npm run start:https" and open its HTTPS address.');
   if (addresses.length === 0) console.log('  No LAN address found — check your network connection.');
   console.log('\nPress Ctrl+C to stop.');

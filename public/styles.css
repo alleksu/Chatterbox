@@ -2041,7 +2041,103 @@ svg {
 
 .call-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   gap: 12px;
+}
+
+.group-call-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px clamp(14px, 3vw, 26px);
+  background: rgba(67, 224, 168, 0.09);
+  border-bottom: 1px solid rgba(67, 224, 168, 0.2);
+  font-size: 13px;
+}
+
+.group-call-banner button {
+  flex-shrink: 0;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+}
+
+.call-overlay.group .call-stage {
+  display: flex;
+  flex-direction: column;
+  width: min(1100px, 100%);
+  aspect-ratio: auto;
+  max-height: 74dvh;
+  overflow-y: auto;
+}
+
+.call-overlay.group .call-identity {
+  order: -1;
+  flex-shrink: 0;
+  padding: 18px;
+}
+
+.group-call-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr));
+  gap: 12px;
+  width: 100%;
+  padding: 0 14px 14px;
+}
+
+.group-call-tile {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 150px;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #171e2c;
+}
+
+.group-call-tile video {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.group-call-tile.local video { transform: scaleX(-1); }
+.group-call-tile.local.screen video { transform: none; }
+
+.group-call-avatar {
+  width: 60px;
+  height: 60px;
+  font-size: 24px;
+  margin-bottom: 24px;
+}
+
+.group-call-caption {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 10px 10px;
+  color: #fff;
+  font-size: 12px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.8));
+  overflow-wrap: anywhere;
+}
+
+.group-call-caption span { color: #c9d3e6; }
+
+@media (max-width: 600px) {
+  .call-overlay.group { padding: 12px; gap: 14px; }
+  .group-call-grid { gap: 8px; padding: 0 8px 8px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 130px), 1fr)); }
+  .group-call-tile { min-height: 130px; }
+  .call-overlay.group .call-actions { max-width: 100%; }
+  .call-overlay.group .call-action { flex: 0 1 auto; padding: 10px 12px; font-size: 12px; }
+  .group-call-banner { align-items: flex-start; }
 }
 
 .call-action {

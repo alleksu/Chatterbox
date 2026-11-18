@@ -134,6 +134,11 @@
           </div>
         </header>
 
+        <div class="group-call-banner" id="group-call-banner" hidden role="status">
+          <span id="group-call-summary"></span>
+          <button type="button" id="group-call-join">Join call</button>
+        </div>
+
         <div class="searchbar" id="searchbar" hidden>
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m20 20-4-4" /></svg>
           <input id="search-input" type="search" placeholder="Search this conversation…" autocomplete="off" />
@@ -203,6 +208,7 @@
 
     <div id="call-overlay" class="call-overlay" hidden>
       <div class="call-stage">
+        <div id="group-call-grid" class="group-call-grid" hidden aria-label="Call participants"></div>
         <video id="call-remote-video" class="call-remote-video" autoplay playsinline hidden></video>
         <audio id="call-remote-audio" autoplay></audio>
         <video id="call-local-video" class="call-local-video" autoplay playsinline muted hidden></video>
@@ -215,8 +221,10 @@
       </div>
       <div class="call-actions">
         <button type="button" id="call-mute" class="call-action" hidden>Mute</button>
+        <button type="button" id="call-camera" class="call-action" hidden>Camera off</button>
         <button type="button" id="call-share" class="call-action" hidden>Share screen</button>
         <button type="button" id="call-devices" class="call-action" hidden>Devices</button>
+        <button type="button" id="call-minimize" class="call-action" hidden>Back to chat</button>
         <button type="button" id="call-accept" class="call-action accept" hidden>Accept</button>
         <button type="button" id="call-decline" class="call-action decline" hidden>Decline</button>
         <button type="button" id="call-hangup" class="call-action hangup">Hang up</button>
