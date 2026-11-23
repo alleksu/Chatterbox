@@ -50,6 +50,7 @@ const els = {
   friendsEmpty: document.getElementById('friends-empty'),
   channels: document.getElementById('channels'),
   onlineCount: document.getElementById('online-count'),
+  memberSearch: document.getElementById('member-search'),
   status: document.getElementById('status'),
   subtitle: document.getElementById('subtitle'),
   meName: document.getElementById('me-name'),
@@ -246,6 +247,7 @@ let typingByChannel = new Map();
 let replyTo = null;
 let editingId = null;
 let searchQuery = '';
+let memberSearch = '';
 let uploadInProgress = false;
 let uploads = [];
 let jumpCount = 0;
@@ -1250,11 +1252,15 @@ function renderUsers() {
   const conversation = activeConversation();
   const members = conversationMembers(conversation);
   const isGroup = conversation?.type === 'group';
+  const query = memberSearch.trim().toLowerCase();
+  const visible = query
+    ? members.filter((user) => (user.name || '').toLowerCase().includes(query))
+    : members;
   if (els.membersTitle) els.membersTitle.textContent = isGroup ? 'Members' : 'Online';
-  els.onlineCount.textContent = String(isGroup ? members.length : users.length);
+  els.onlineCount.textContent = String(query ? visible.length : (isGroup ? members.length : users.length));
   els.users.replaceChildren();
 
-  for (const user of members) {
+  for (const user of visible) {
     const li = make('li');
     if (user.id === me.id) li.classList.add('is-me');
     if (!user.online) li.classList.add('offline');
@@ -1283,6 +1289,10 @@ function renderUsers() {
     }
 
     els.users.append(li);
+  }
+
+  if (query && !visible.length) {
+    els.users.append(make('li', 'member-empty', `No devices match “${memberSearch.trim()}”`));
   }
 
   if (conversation) updateHeader(conversation);
@@ -3757,6 +3767,11 @@ els.searchInput.addEventListener('input', () => {
 
 els.searchClose.addEventListener('click', closeSearch);
 
+els.memberSearch.addEventListener('input', () => {
+  memberSearch = els.memberSearch.value;
+  renderUsers();
+});
+
 els.toggleTheme.addEventListener('click', () => {
   applyTheme(settings.theme === 'light' ? 'dark' : 'light');
   syncColorInputs();
@@ -3786,11 +3801,12 @@ function clearAccountState() {
   if(call) endCall('Signed out', null);
   for(const item of uploads) { item.cancelled=true; item.xhr?.abort(); }
   uploads=[]; uploadInProgress=false; renderUploads();
-  replyTo=null; editingId=null; searchQuery=''; selectedMessageId=null; typingByChannel.clear(); sentReads.clear();
+  replyTo=null; editingId=null; searchQuery=''; memberSearch=''; selectedMessageId=null; typingByChannel.clear(); sentReads.clear();
   globalSearchRequest++; clearTimeout(globalSearchTimer);
   for(const key of ['pinsList','callsList','searchResults']) els[key]?.replaceChildren();
   updateComposerBanner();
   els.input.value=''; autoResize();
+  els.memberSearch.value='';
   conversations=[]; users=[]; friends=[]; callLog=[]; seen={}; drafts={}; activeId='general';
   me.id=''; me.name=''; me.username=''; csrfToken=''; lastAccountId='';
   for(const key of [ACCOUNT_KEY,SEEN_KEY,DRAFT_KEY,CHANNEL_KEY]) localStorage.removeItem(key);
