@@ -473,6 +473,47 @@ svg {
   scrollbar-width: thin;
 }
 
+.member-search {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  margin: 0 4px 4px;
+  padding: 6px 9px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+[data-theme="light"] .member-search {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.member-search svg {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+}
+
+.member-search input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.member-search input::placeholder {
+  color: var(--muted-2);
+}
+
+.member-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
 .users li {
   display: flex;
   align-items: center;
